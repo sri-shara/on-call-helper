@@ -202,6 +202,164 @@ async def get_incident(incident_id: str):
     }
 
 
+# ═══════════════ Webhook Endpoints ═══════════════
+
+
+@app.post("/webhook/gcp-logs", tags=["Webhooks"])
+async def receive_gcp_logs(request: Request):
+    """
+    Receive GCP Cloud Logging errors via Pub/Sub push.
+
+    This endpoint receives error logs from GCP Cloud Logging via a Pub/Sub
+    push subscription. It parses the log entry, applies filters, and creates
+    an incident if appropriate.
+
+    GCP Setup:
+    1. Create topic: gcloud pubsub topics create oncall-helper-errors
+    2. Create push subscription pointing to this endpoint
+    3. Create log sink with filter: severity>=ERROR
+    """
+    from backend.services.gcp_logging import parse_pubsub_message, create_incident_from_log
+    from backend.filters import is_transient_error, should_process_tenant
+
+    try:
+        data = await request.json()
+    except Exception as e:
+        logger.error(f"Failed to parse webhook request body: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid JSON body"}
+        )
+
+    try:
+        # Parse the Pub/Sub message
+        log_entry = parse_pubsub_message(data)
+        logger.info(f"Received log entry: {log_entry.insert_id} from {log_entry.service_name}")
+
+        # Check for duplicates
+        if log_entry.insert_id and storage.is_duplicate(log_entry.insert_id):
+            logger.debug(f"Duplicate log entry: {log_entry.insert_id}")
+            return {
+                "status": "duplicate",
+                "reason": "Log entry already processed",
+                "insert_id": log_entry.insert_id,
+            }
+
+        # Apply transient error filter
+        is_transient, transient_reason, category = is_transient_error(log_entry.error_message)
+        if is_transient:
+            logger.info(f"Filtered transient error [{category}]: {transient_reason}")
+            return {
+                "status": "filtered",
+                "reason": transient_reason,
+                "category": category,
+                "filter": "transient",
+            }
+
+        # Apply tenant filter
+        should_process, tenant_reason = should_process_tenant(
+            tenant_id=log_entry.tenant_id,
+            tenant_name=log_entry.tenant_name
+        )
+        if not should_process:
+            logger.info(f"Filtered by tenant: {tenant_reason}")
+            return {
+                "status": "filtered",
+                "reason": tenant_reason,
+                "filter": "tenant",
+            }
+
+        # Create incident
+        incident = create_incident_from_log(log_entry)
+        storage.save_incident(incident)
+
+        logger.info(f"Created incident {incident.id}: {incident.title}")
+
+        # TODO: Trigger pipeline processing (will be added in orchestrator PR)
+
+        return {
+            "status": "processing",
+            "incident_id": incident.id,
+            "title": incident.title,
+            "severity": incident.severity.value,
+            "service": incident.service_name,
+        }
+
+    except ValueError as e:
+        logger.error(f"Failed to parse log entry: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid log entry format: {str(e)}"}
+        )
+
+
+@app.post("/webhook/test", tags=["Webhooks"])
+async def test_webhook(request: Request):
+    """
+    Test endpoint to simulate receiving a GCP log entry.
+
+    Useful for development and testing without actual GCP setup.
+    """
+    from backend.services.gcp_logging import create_incident_from_log, GCPLogEntry
+    from backend.filters import is_transient_error, should_process_tenant
+    from backend.models import Severity
+
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid JSON body"}
+        )
+
+    # Create a mock log entry from the test data
+    log_entry = GCPLogEntry(
+        insert_id=data.get("insert_id", f"test-{datetime.utcnow().timestamp()}"),
+        timestamp=datetime.utcnow(),
+        severity=data.get("severity", "ERROR"),
+        log_name=data.get("log_name", "test-log"),
+        resource_type=data.get("resource_type", "cloud_run_revision"),
+        resource_labels=data.get("resource_labels", {}),
+        error_message=data.get("error_message", "Test error message"),
+        stack_trace=data.get("stack_trace"),
+        file_path=data.get("file_path"),
+        service_name=data.get("service_name", "test-service"),
+        tenant_id=data.get("tenant_id"),
+        tenant_name=data.get("tenant_name"),
+    )
+
+    # Apply filters
+    is_transient, transient_reason, category = is_transient_error(log_entry.error_message)
+    if is_transient:
+        return {
+            "status": "filtered",
+            "reason": transient_reason,
+            "filter": "transient",
+        }
+
+    should_process, tenant_reason = should_process_tenant(
+        tenant_id=log_entry.tenant_id,
+        tenant_name=log_entry.tenant_name
+    )
+    if not should_process:
+        return {
+            "status": "filtered",
+            "reason": tenant_reason,
+            "filter": "tenant",
+        }
+
+    # Create incident
+    incident = create_incident_from_log(log_entry)
+    storage.save_incident(incident)
+
+    return {
+        "status": "processing",
+        "incident_id": incident.id,
+        "title": incident.title,
+        "severity": incident.severity.value,
+    }
+
+
 # ═══════════════ Error Handlers ═══════════════
 
 

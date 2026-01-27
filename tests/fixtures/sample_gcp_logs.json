@@ -1,0 +1,31 @@
+{
+  "valid_error_text_payload": {
+    "message": {
+      "data": "eyJpbnNlcnRJZCI6InRlc3QtMTIzIiwidGltZXN0YW1wIjoiMjAyNC0wMS0xNVQxMDozMDowMFoiLCJzZXZlcml0eSI6IkVSUk9SIiwibG9nTmFtZSI6InByb2plY3RzL251Y2xldXMvbG9ncy9jYXNlc2VydmljZSIsInJlc291cmNlIjp7InR5cGUiOiJjbG91ZF9ydW5fcmV2aXNpb24iLCJsYWJlbHMiOnsic2VydmljZV9uYW1lIjoiY2FzZXNlcnZpY2UifX0sInRleHRQYXlsb2FkIjoicGFuaWM6IHJ1bnRpbWUgZXJyb3I6IG5pbCBwb2ludGVyIGRlcmVmZXJlbmNlIn0=",
+      "messageId": "12345",
+      "publishTime": "2024-01-15T10:30:00Z"
+    },
+    "subscription": "projects/nucleus/subscriptions/oncall-helper-sub"
+  },
+  "valid_error_json_payload": {
+    "message": {
+      "data": "eyJpbnNlcnRJZCI6InRlc3QtNDU2IiwidGltZXN0YW1wIjoiMjAyNC0wMS0xNVQxMDozMDowMFoiLCJzZXZlcml0eSI6IkVSUk9SIiwibG9nTmFtZSI6InByb2plY3RzL251Y2xldXMvbG9ncy9hbGVydHNlcnZpY2UiLCJyZXNvdXJjZSI6eyJ0eXBlIjoiY2xvdWRfcnVuX3JldmlzaW9uIiwibGFiZWxzIjp7InNlcnZpY2VfbmFtZSI6ImFsZXJ0c2VydmljZSJ9fSwianNvblBheWxvYWQiOnsibWVzc2FnZSI6IkRhdGFiYXNlIGNvbm5lY3Rpb24gZmFpbGVkIiwiZXJyb3IiOiJjb25uZWN0aW9uIHJlZnVzZWQiLCJ0ZW5hbnRfaWQiOiJkM2Y1YzJmMC04ZTExLTRmZjctYThjZC1hNzY3NTIxYWM4OTEiLCJ0ZW5hbnRfbmFtZSI6IldoaXRuZXkifX0=",
+      "messageId": "12346"
+    },
+    "subscription": "projects/nucleus/subscriptions/oncall-helper-sub"
+  },
+  "transient_error": {
+    "message": {
+      "data": "eyJpbnNlcnRJZCI6InRyYW5zaWVudC0xMjMiLCJ0aW1lc3RhbXAiOiIyMDI0LTAxLTE1VDEwOjMwOjAwWiIsInNldmVyaXR5IjoiRVJST1IiLCJsb2dOYW1lIjoicHJvamVjdHMvbnVjbGV1cy9sb2dzL3Rlc3QiLCJyZXNvdXJjZSI6eyJ0eXBlIjoiY2xvdWRfcnVuX3JldmlzaW9uIiwibGFiZWxzIjp7fX0sInRleHRQYXlsb2FkIjoiUm91dGluZyBkZWFkbGluZSBleHBpcmVkIn0=",
+      "messageId": "12347"
+    },
+    "subscription": "projects/nucleus/subscriptions/oncall-helper-sub"
+  },
+  "demo_tenant_error": {
+    "message": {
+      "data": "eyJpbnNlcnRJZCI6ImRlbW8tMTIzIiwidGltZXN0YW1wIjoiMjAyNC0wMS0xNVQxMDozMDowMFoiLCJzZXZlcml0eSI6IkVSUk9SIiwibG9nTmFtZSI6InByb2plY3RzL251Y2xldXMvbG9ncy90ZXN0IiwicmVzb3VyY2UiOnsidHlwZSI6ImNsb3VkX3J1bl9yZXZpc2lvbiIsImxhYmVscyI6e319LCJqc29uUGF5bG9hZCI6eyJtZXNzYWdlIjoiUmVhbCBlcnJvciIsInRlbmFudF9pZCI6IjA0ZDMyMjlmLTcwOTctNGFmMy04NmRmLTM3ZTI5Nzc1ZDE0NiJ9fQ==",
+      "messageId": "12348"
+    },
+    "subscription": "projects/nucleus/subscriptions/oncall-helper-sub"
+  }
+}
