@@ -73,8 +73,14 @@ class Storage:
         incidents = list(self._incidents.values())
         if status:
             incidents = [i for i in incidents if i.status == status]
-        # Sort by created_at descending
-        incidents.sort(key=lambda i: i.created_at, reverse=True)
+        # Sort by created_at descending (handle mixed timezone-aware/naive datetimes)
+        def sort_key(i):
+            dt = i.created_at
+            # Convert to naive UTC for comparison
+            if dt.tzinfo is not None:
+                return dt.replace(tzinfo=None)
+            return dt
+        incidents.sort(key=sort_key, reverse=True)
         return incidents[:limit]
 
     def is_duplicate(self, gcp_insert_id: str) -> bool:
