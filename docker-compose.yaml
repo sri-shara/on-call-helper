@@ -1,0 +1,51 @@
+# On Call Helper - Docker Compose
+
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=true
+      - LOG_LEVEL=INFO
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_REPO=${GITHUB_REPO}
+      - PAGERDUTY_ROUTING_KEY=${PAGERDUTY_ROUTING_KEY}
+      - NUCLEUS_REPO_PATH=/repos/nucleus
+      - ONCALL_REPO_PATH=/repos/oncall
+    volumes:
+      # Mount repositories for access
+      - ${NUCLEUS_REPO_PATH:-/Users/sri/nucleus}:/repos/nucleus:ro
+      - ${ONCALL_REPO_PATH:-/Users/sri/oncall}:/repos/oncall:ro
+      # Mount GCP credentials if needed
+      - ${GCP_CREDENTIALS_PATH:-./credentials.json}:/app/credentials.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Frontend will be added in PR 15
+  # frontend:
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "3000:3000"
+  #   depends_on:
+  #     - backend
+  #   environment:
+  #     - VITE_API_URL=http://backend:8000
+  #   restart: unless-stopped
+
+networks:
+  default:
+    name: oncall-helper-network
