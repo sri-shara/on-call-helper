@@ -1,0 +1,93 @@
+# On Call Helper - Git Ignore
+
+# ═══════════════ Python ═══════════════
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ═══════════════ Virtual Environment ═══════════════
+venv/
+.venv/
+ENV/
+env/
+.env
+
+# ═══════════════ IDE ═══════════════
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ═══════════════ Testing ═══════════════
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# ═══════════════ Jupyter ═══════════════
+.ipynb_checkpoints/
+
+# ═══════════════ Node.js (Frontend) ═══════════════
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ═══════════════ Build ═══════════════
+frontend/dist/
+frontend/build/
+*.local
+
+# ═══════════════ Secrets & Credentials ═══════════════
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+service-account.json
+
+# ═══════════════ OS ═══════════════
+.DS_Store
+Thumbs.db
+
+# ═══════════════ Logs ═══════════════
+logs/
+*.log
+
+# ═══════════════ Temp ═══════════════
+tmp/
+temp/
+*.tmp
+*.temp
+
+# ═══════════════ Sandbox ═══════════════
+sandbox/clusters/
+sandbox/workdirs/
