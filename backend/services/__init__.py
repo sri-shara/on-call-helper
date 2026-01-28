@@ -38,6 +38,14 @@ from .pagerduty import (
     resolve_incident,
     escalate_incident,
 )
+from .production_monitor import (
+    ProductionMonitorService,
+    ProductionMonitorError,
+    MonitoringNotConfiguredError,
+    MonitoringTask,
+    MonitoringState,
+    verify_production_fix,
+)
 
 __all__ = [
     "GCPLoggingService",
@@ -70,4 +78,10 @@ __all__ = [
     "trigger_incident",
     "resolve_incident",
     "escalate_incident",
+    "ProductionMonitorService",
+    "ProductionMonitorError",
+    "MonitoringNotConfiguredError",
+    "MonitoringTask",
+    "MonitoringState",
+    "verify_production_fix",
 ]
