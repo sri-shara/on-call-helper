@@ -14,7 +14,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -49,6 +49,10 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down On Call Helper")
+
+    # Close WebSocket connections
+    from backend.websocket_manager import ws_manager
+    await ws_manager.close_all()
 
 
 # Create FastAPI app
@@ -357,6 +361,58 @@ async def test_webhook(request: Request):
         "incident_id": incident.id,
         "title": incident.title,
         "severity": incident.severity.value,
+    }
+
+
+# ═══════════════ WebSocket Endpoint ═══════════════
+
+
+from backend.websocket_manager import ws_manager, EventType
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time updates.
+
+    Clients receive:
+    - Welcome message with current metrics on connect
+    - Incident lifecycle events (created, resolved, escalated)
+    - Pipeline stage updates (triage, fix, review, test, PR)
+    - Agent thinking messages
+    - Code diff previews
+
+    Clients can send:
+    - {"type": "ping"} - heartbeat, server responds with pong
+    - {"type": "subscribe", "incident_id": "..."} - subscribe to specific incident
+    - {"type": "unsubscribe", "incident_id": "..."} - unsubscribe from incident
+    """
+    client_id = await ws_manager.connect(websocket)
+
+    try:
+        while True:
+            # Receive messages from client
+            data = await websocket.receive_text()
+
+            # Handle client message
+            response = await ws_manager.handle_client_message(client_id, data)
+
+            if response:
+                await websocket.send_text(response.to_json())
+
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(client_id)
+    except Exception as e:
+        logger.error(f"WebSocket error for client {client_id}: {e}")
+        await ws_manager.disconnect(client_id)
+
+
+@app.get("/ws/connections", tags=["WebSocket"])
+async def get_websocket_connections():
+    """Get information about active WebSocket connections."""
+    return {
+        "count": ws_manager.connection_count,
+        "connections": ws_manager.get_all_connections(),
     }
 
 
