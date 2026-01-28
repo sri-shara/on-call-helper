@@ -364,9 +364,30 @@ class GCPLoggingService:
     Supports both Pub/Sub push (webhook) and polling modes.
     """
 
-    def __init__(self, project_id: Optional[str] = None):
-        self.project_id = project_id
+    def __init__(self, project_id: Optional[str] = None, credentials_path: Optional[str] = None):
+        from backend.config import settings
+        self.project_id = project_id or settings.gcp_project_id
+        self.credentials_path = credentials_path or settings.gcp_credentials_path
+        self.log_filter = settings.gcp_log_filter
         self._polling_active = False
+        self._polling_task = None
+        self._seen_insert_ids: set = set()  # Track processed logs
+        self._last_poll_time: Optional[datetime] = None
+        self._client = None
+
+    def _get_client(self):
+        """Get or create the Cloud Logging client."""
+        if self._client is None:
+            from google.cloud import logging as cloud_logging
+            import os
+
+            if self.credentials_path and os.path.exists(self.credentials_path):
+                self._client = cloud_logging.Client(project=self.project_id)
+            else:
+                # Use default credentials (ADC)
+                self._client = cloud_logging.Client(project=self.project_id)
+
+        return self._client
 
     async def handle_webhook(self, data: Dict[str, Any]) -> Tuple[GCPLogEntry, Incident]:
         """
@@ -382,18 +403,168 @@ class GCPLoggingService:
         incident = create_incident_from_log(log_entry)
         return log_entry, incident
 
-    async def start_polling(self, interval_seconds: int = 30):
+    def _parse_log_entry_direct(self, entry) -> Optional[GCPLogEntry]:
+        """Parse a Cloud Logging entry directly (not from Pub/Sub)."""
+        try:
+            # Convert to dict format similar to Pub/Sub
+            log_dict = {
+                "insertId": entry.insert_id,
+                "timestamp": entry.timestamp.isoformat() if entry.timestamp else datetime.utcnow().isoformat(),
+                "severity": entry.severity or "ERROR",
+                "logName": entry.log_name or "",
+                "resource": {
+                    "type": entry.resource.type if entry.resource else "unknown",
+                    "labels": dict(entry.resource.labels) if entry.resource and entry.resource.labels else {},
+                },
+                "labels": dict(entry.labels) if entry.labels else {},
+            }
+
+            # Add payload
+            if entry.payload:
+                if isinstance(entry.payload, str):
+                    log_dict["textPayload"] = entry.payload
+                elif isinstance(entry.payload, dict):
+                    log_dict["jsonPayload"] = entry.payload
+
+            # Extract tenant info
+            tenant_id, tenant_name = _extract_tenant_info(log_dict)
+
+            return GCPLogEntry(
+                insert_id=entry.insert_id or "",
+                timestamp=entry.timestamp or datetime.utcnow(),
+                severity=entry.severity or "ERROR",
+                log_name=entry.log_name or "",
+                resource_type=log_dict["resource"]["type"],
+                resource_labels=log_dict["resource"]["labels"],
+                text_payload=log_dict.get("textPayload"),
+                json_payload=log_dict.get("jsonPayload"),
+                error_message=_extract_error_message(log_dict),
+                stack_trace=_extract_stack_trace(log_dict),
+                file_path=_extract_file_path(log_dict),
+                service_name=_extract_service_name(log_dict),
+                tenant_id=tenant_id,
+                tenant_name=tenant_name,
+            )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to parse log entry: {e}")
+            return None
+
+    async def poll_once(self, callback) -> int:
+        """
+        Poll Cloud Logging once and process new errors.
+
+        Args:
+            callback: Async function to call with each new incident
+
+        Returns:
+            Number of new errors processed
+        """
+        import asyncio
+        from datetime import timedelta
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        client = self._get_client()
+
+        # Build time filter - look back 5 minutes on first poll, then from last poll
+        if self._last_poll_time:
+            start_time = self._last_poll_time - timedelta(seconds=10)  # Small overlap
+        else:
+            start_time = datetime.utcnow() - timedelta(minutes=5)
+
+        time_filter = f'timestamp>="{start_time.isoformat()}Z"'
+        full_filter = f"{self.log_filter} AND {time_filter}"
+
+        logger.info(f"Polling GCP logs with filter: {full_filter}")
+
+        processed = 0
+        try:
+            # Run in thread pool since the client is synchronous
+            def fetch_entries():
+                return list(client.list_entries(
+                    filter_=full_filter,
+                    order_by="timestamp desc",
+                    max_results=100,
+                ))
+
+            entries = await asyncio.get_event_loop().run_in_executor(None, fetch_entries)
+
+            for entry in entries:
+                # Skip if already processed
+                if entry.insert_id in self._seen_insert_ids:
+                    continue
+
+                self._seen_insert_ids.add(entry.insert_id)
+
+                # Keep seen IDs bounded
+                if len(self._seen_insert_ids) > 10000:
+                    # Remove oldest half
+                    self._seen_insert_ids = set(list(self._seen_insert_ids)[-5000:])
+
+                # Parse and create incident
+                log_entry = self._parse_log_entry_direct(entry)
+                if log_entry:
+                    incident = create_incident_from_log(log_entry)
+                    await callback(incident)
+                    processed += 1
+                    logger.info(f"Created incident from polled log: {incident.id}")
+
+        except Exception as e:
+            logger.error(f"Error polling GCP logs: {e}")
+
+        self._last_poll_time = datetime.utcnow()
+        return processed
+
+    async def start_polling(self, callback, interval_seconds: int = 30):
         """
         Start polling Cloud Logging API for errors.
 
-        Note: Requires google-cloud-logging package and credentials.
+        Args:
+            callback: Async function to call with each new incident
+            interval_seconds: How often to poll (default 30s)
         """
-        # TODO: Implement polling mode
+        import asyncio
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        if self._polling_active:
+            logger.warning("Polling already active")
+            return
+
         self._polling_active = True
+        logger.info(f"Starting GCP log polling every {interval_seconds}s")
+
+        async def poll_loop():
+            while self._polling_active:
+                try:
+                    count = await self.poll_once(callback)
+                    if count > 0:
+                        logger.info(f"Processed {count} new errors from GCP")
+                except Exception as e:
+                    logger.error(f"Polling error: {e}")
+
+                await asyncio.sleep(interval_seconds)
+
+        self._polling_task = asyncio.create_task(poll_loop())
 
     async def stop_polling(self):
         """Stop polling Cloud Logging API."""
+        import asyncio
+        import logging
+        logger = logging.getLogger(__name__)
+
         self._polling_active = False
+        if self._polling_task:
+            self._polling_task.cancel()
+            try:
+                await self._polling_task
+            except asyncio.CancelledError:
+                pass
+            self._polling_task = None
+        logger.info("Stopped GCP log polling")
 
     @property
     def is_polling(self) -> bool:

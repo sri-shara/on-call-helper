@@ -279,7 +279,33 @@ async def receive_gcp_logs(request: Request):
 
         logger.info(f"Created incident {incident.id}: {incident.title}")
 
-        # TODO: Trigger pipeline processing (will be added in orchestrator PR)
+        # Broadcast to WebSocket clients
+        from backend.websocket_manager import ws_manager, create_pipeline_event_callback
+        await ws_manager.broadcast_incident_created(
+            incident_id=incident.id,
+            title=incident.title,
+            service=incident.service_name,
+            severity=incident.severity.value,
+        )
+
+        # Trigger pipeline processing in background
+        import asyncio
+        from backend.agents.orchestrator import PipelineOrchestrator
+
+        async def run_pipeline():
+            try:
+                callback = create_pipeline_event_callback()
+                orchestrator = PipelineOrchestrator(
+                    event_callback=lambda e: asyncio.create_task(callback(e)),
+                    skip_sandbox=True,  # Skip Kind cluster for now
+                    skip_verification=True,  # Skip production monitoring for now
+                )
+                result = await orchestrator.process_incident(incident)
+                logger.info(f"Pipeline completed for {incident.id}: success={result.success}")
+            except Exception as e:
+                logger.error(f"Pipeline failed for {incident.id}: {e}")
+
+        asyncio.create_task(run_pipeline())
 
         return {
             "status": "processing",
@@ -356,11 +382,131 @@ async def test_webhook(request: Request):
     incident = create_incident_from_log(log_entry)
     storage.save_incident(incident)
 
+    # Broadcast to WebSocket clients
+    from backend.websocket_manager import ws_manager, create_pipeline_event_callback
+    await ws_manager.broadcast_incident_created(
+        incident_id=incident.id,
+        title=incident.title,
+        service=incident.service_name,
+        severity=incident.severity.value,
+    )
+
+    # Trigger pipeline processing in background
+    import asyncio
+    from backend.agents.orchestrator import PipelineOrchestrator
+
+    async def run_pipeline():
+        try:
+            callback = create_pipeline_event_callback()
+            orchestrator = PipelineOrchestrator(
+                event_callback=lambda e: asyncio.create_task(callback(e)),
+                skip_sandbox=True,  # Skip Kind cluster for now
+                skip_verification=True,  # Skip production monitoring for now
+            )
+            result = await orchestrator.process_incident(incident)
+            logger.info(f"Pipeline completed for {incident.id}: success={result.success}")
+        except Exception as e:
+            logger.error(f"Pipeline failed for {incident.id}: {e}")
+
+    asyncio.create_task(run_pipeline())
+
     return {
         "status": "processing",
         "incident_id": incident.id,
         "title": incident.title,
         "severity": incident.severity.value,
+    }
+
+
+# ═══════════════ GCP Polling Endpoints ═══════════════
+
+
+# Global GCP logging service instance
+_gcp_service = None
+
+
+def get_gcp_service():
+    """Get or create the GCP logging service."""
+    global _gcp_service
+    if _gcp_service is None:
+        from backend.services.gcp_logging import GCPLoggingService
+        _gcp_service = GCPLoggingService()
+    return _gcp_service
+
+
+@app.post("/gcp/polling/start", tags=["GCP"])
+async def start_gcp_polling(interval_seconds: int = 30):
+    """
+    Start polling GCP Cloud Logging for errors.
+
+    This requires read access to GCP Cloud Logging (Logging Viewer role).
+    Errors will be automatically processed through the incident pipeline.
+    """
+    from backend.services.gcp_logging import GCPLoggingService, create_incident_from_log
+    from backend.websocket_manager import ws_manager, create_pipeline_event_callback
+    from backend.agents.orchestrator import PipelineOrchestrator
+    import asyncio
+
+    gcp_service = get_gcp_service()
+
+    if gcp_service.is_polling:
+        return {"status": "already_running", "message": "GCP polling is already active"}
+
+    async def process_incident(incident):
+        """Process a new incident from GCP logs."""
+        storage.save_incident(incident)
+
+        # Broadcast to WebSocket clients
+        await ws_manager.broadcast_incident_created(
+            incident_id=incident.id,
+            title=incident.title,
+            service=incident.service_name,
+            severity=incident.severity.value,
+        )
+
+        # Run pipeline
+        callback = create_pipeline_event_callback()
+        orchestrator = PipelineOrchestrator(
+            event_callback=lambda e: asyncio.create_task(callback(e)),
+            skip_sandbox=True,
+            skip_verification=True,
+        )
+        try:
+            result = await orchestrator.process_incident(incident)
+            logger.info(f"Pipeline completed for {incident.id}: success={result.success}")
+        except Exception as e:
+            logger.error(f"Pipeline failed for {incident.id}: {e}")
+
+    await gcp_service.start_polling(process_incident, interval_seconds)
+
+    return {
+        "status": "started",
+        "message": f"GCP polling started (every {interval_seconds}s)",
+        "project_id": gcp_service.project_id,
+        "filter": gcp_service.log_filter,
+    }
+
+
+@app.post("/gcp/polling/stop", tags=["GCP"])
+async def stop_gcp_polling():
+    """Stop polling GCP Cloud Logging."""
+    gcp_service = get_gcp_service()
+
+    if not gcp_service.is_polling:
+        return {"status": "not_running", "message": "GCP polling is not active"}
+
+    await gcp_service.stop_polling()
+    return {"status": "stopped", "message": "GCP polling stopped"}
+
+
+@app.get("/gcp/polling/status", tags=["GCP"])
+async def gcp_polling_status():
+    """Get current GCP polling status."""
+    gcp_service = get_gcp_service()
+    return {
+        "is_polling": gcp_service.is_polling,
+        "project_id": gcp_service.project_id,
+        "filter": gcp_service.log_filter,
     }
 
 

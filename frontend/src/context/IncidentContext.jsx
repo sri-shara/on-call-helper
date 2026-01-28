@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useReducer, useCallback } from 'react'
+import React, { createContext, useContext, useReducer, useCallback, useEffect } from 'react'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 // Initial state
@@ -271,7 +271,7 @@ export function IncidentProvider({ children }) {
   // Determine WebSocket URL
   const wsUrl = typeof window !== 'undefined'
     ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`
-    : 'ws://localhost:8000/ws'
+    : 'ws://localhost:8001/ws'
 
   // WebSocket connection
   const {
@@ -309,6 +309,13 @@ export function IncidentProvider({ children }) {
       console.error('Failed to fetch incidents:', error)
     }
   }, [])
+
+  // Fetch incidents on mount and when connected
+  useEffect(() => {
+    if (isConnected) {
+      fetchIncidents()
+    }
+  }, [isConnected, fetchIncidents])
 
   // Context value
   const value = {
