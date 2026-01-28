@@ -17,6 +17,15 @@ from .coderabbit import (
     CodeRabbitNotInstalledError,
     review_fix,
 )
+from .sandbox import (
+    SandboxService,
+    Sandbox,
+    SandboxError,
+    SandboxCreationError,
+    SandboxTestError,
+    KindNotInstalledError,
+    run_sandbox_tests,
+)
 
 __all__ = [
     "GCPLoggingService",
@@ -32,4 +41,11 @@ __all__ = [
     "CodeRabbitError",
     "CodeRabbitNotInstalledError",
     "review_fix",
+    "SandboxService",
+    "Sandbox",
+    "SandboxError",
+    "SandboxCreationError",
+    "SandboxTestError",
+    "KindNotInstalledError",
+    "run_sandbox_tests",
 ]
