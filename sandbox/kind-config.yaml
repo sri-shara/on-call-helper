@@ -1,0 +1,31 @@
+# Kind cluster configuration for On Call Helper sandbox testing
+# This creates a minimal cluster for running Nucleus tests
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+# Single node cluster is sufficient for testing
+nodes:
+  - role: control-plane
+    # Extra port mappings for services
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 30443
+        hostPort: 8443
+        protocol: TCP
+
+# Networking configuration
+networking:
+  # Use default CNI
+  disableDefaultCNI: false
+  # Pod subnet
+  podSubnet: "10.244.0.0/16"
+  # Service subnet
+  serviceSubnet: "10.96.0.0/12"
+
+# Container runtime settings
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
+      endpoint = ["http://kind-registry:5000"]
