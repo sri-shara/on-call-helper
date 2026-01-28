@@ -27,6 +27,17 @@ from .sandbox import (
     KindNotInstalledError,
     run_sandbox_tests,
 )
+from .pagerduty import (
+    PagerDutyService,
+    PagerDutyError,
+    PagerDutyConfigError,
+    PagerDutyAPIError,
+    PagerDutyEvent,
+    EventAction,
+    trigger_incident,
+    resolve_incident,
+    escalate_incident,
+)
 
 __all__ = [
     "GCPLoggingService",
@@ -50,4 +61,13 @@ __all__ = [
     "SandboxTestError",
     "KindNotInstalledError",
     "run_sandbox_tests",
+    "PagerDutyService",
+    "PagerDutyError",
+    "PagerDutyConfigError",
+    "PagerDutyAPIError",
+    "PagerDutyEvent",
+    "EventAction",
+    "trigger_incident",
+    "resolve_incident",
+    "escalate_incident",
 ]
