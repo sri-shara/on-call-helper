@@ -11,6 +11,12 @@ from .github import (
     GitHubAuthError,
     get_nucleus_file,
 )
+from .coderabbit import (
+    CodeRabbitService,
+    CodeRabbitError,
+    CodeRabbitNotInstalledError,
+    review_fix,
+)
 
 __all__ = [
     "GCPLoggingService",
@@ -22,4 +28,8 @@ __all__ = [
     "GitHubRateLimitError",
     "GitHubAuthError",
     "get_nucleus_file",
+    "CodeRabbitService",
+    "CodeRabbitError",
+    "CodeRabbitNotInstalledError",
+    "review_fix",
 ]
