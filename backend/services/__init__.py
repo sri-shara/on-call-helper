@@ -9,6 +9,7 @@ from .github import (
     GitHubError,
     GitHubRateLimitError,
     GitHubAuthError,
+    PullRequest,
     get_nucleus_file,
 )
 from .coderabbit import (
@@ -36,6 +37,7 @@ __all__ = [
     "GitHubError",
     "GitHubRateLimitError",
     "GitHubAuthError",
+    "PullRequest",
     "get_nucleus_file",
     "CodeRabbitService",
     "CodeRabbitError",
