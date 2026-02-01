@@ -3,11 +3,16 @@ Triage Agent for On Call Helper.
 
 Uses Claude AI with embedded SRE knowledge to analyze production incidents
 and classify them for appropriate action.
+
+Enhanced with GCP log context fetching - instead of saying "need more details",
+the agent actively queries GCP logs to gather additional context.
 """
 
+import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from anthropic import Anthropic, APIError, APIConnectionError, RateLimitError
@@ -52,10 +57,172 @@ class TriageAgent:
         self.model = model or settings.triage_model
         self.client: Optional[Anthropic] = None
         self._system_prompt: Optional[str] = None
+        self._gcp_client = None
 
         # Lazy initialize client when needed
         if self.api_key:
             self.client = Anthropic(api_key=self.api_key)
+
+    def _get_gcp_client(self):
+        """Get or create GCP Logging client for context fetching."""
+        if self._gcp_client is None:
+            try:
+                from google.cloud import logging as cloud_logging
+                self._gcp_client = cloud_logging.Client(project=settings.gcp_project_id)
+            except Exception as e:
+                logger.warning(f"Failed to initialize GCP client: {e}")
+                return None
+        return self._gcp_client
+
+    async def _fetch_gcp_context(self, incident: Incident) -> Dict[str, Any]:
+        """
+        Fetch additional context from GCP logs for better triage.
+
+        Queries for:
+        1. Related errors from same service in past hour
+        2. Error frequency/pattern
+        3. Similar errors across other services
+        4. Recent logs around the same timestamp
+        """
+        context = {
+            "related_errors": [],
+            "error_frequency": None,
+            "similar_across_services": [],
+            "recent_service_logs": [],
+        }
+
+        client = self._get_gcp_client()
+        if not client:
+            logger.info("GCP client not available, skipping context fetch")
+            return context
+
+        try:
+            # Calculate time window
+            error_time = incident.created_at or datetime.utcnow()
+            start_time = error_time - timedelta(hours=1)
+            end_time = error_time + timedelta(minutes=5)
+
+            time_filter = f'timestamp>="{start_time.isoformat()}Z" AND timestamp<="{end_time.isoformat()}Z"'
+
+            # 1. Get related errors from same service
+            if incident.service_name and incident.service_name != "unknown":
+                service_filter = f'severity>=ERROR AND {time_filter} AND resource.labels.service_name="{incident.service_name}"'
+
+                def fetch_service_errors():
+                    return list(client.list_entries(
+                        filter_=service_filter,
+                        order_by="timestamp desc",
+                        max_results=20,
+                    ))
+
+                entries = await asyncio.get_event_loop().run_in_executor(None, fetch_service_errors)
+
+                # Summarize related errors
+                error_counts = {}
+                for entry in entries:
+                    msg = self._extract_error_summary(entry)
+                    error_counts[msg] = error_counts.get(msg, 0) + 1
+
+                context["related_errors"] = [
+                    {"message": msg, "count": count}
+                    for msg, count in sorted(error_counts.items(), key=lambda x: -x[1])[:5]
+                ]
+                context["error_frequency"] = {
+                    "total_errors_past_hour": len(entries),
+                    "unique_error_types": len(error_counts),
+                }
+
+            # 2. Check for similar errors across all services
+            if incident.error_message:
+                # Extract key error phrase for searching
+                error_phrase = self._extract_error_phrase(incident.error_message)
+                if error_phrase:
+                    cross_filter = f'severity>=ERROR AND {time_filter} AND textPayload:"{error_phrase}"'
+
+                    def fetch_cross_service():
+                        return list(client.list_entries(
+                            filter_=cross_filter,
+                            order_by="timestamp desc",
+                            max_results=10,
+                        ))
+
+                    try:
+                        cross_entries = await asyncio.get_event_loop().run_in_executor(None, fetch_cross_service)
+
+                        # Group by service
+                        by_service = {}
+                        for entry in cross_entries:
+                            svc = self._extract_service_from_entry(entry)
+                            by_service[svc] = by_service.get(svc, 0) + 1
+
+                        context["similar_across_services"] = [
+                            {"service": svc, "count": count}
+                            for svc, count in sorted(by_service.items(), key=lambda x: -x[1])
+                        ]
+                    except Exception as e:
+                        logger.debug(f"Cross-service search failed: {e}")
+
+            # 3. Get recent INFO/WARNING logs from the service for context
+            if incident.service_name and incident.service_name != "unknown":
+                context_filter = f'severity>=INFO AND {time_filter} AND resource.labels.service_name="{incident.service_name}"'
+
+                def fetch_context_logs():
+                    return list(client.list_entries(
+                        filter_=context_filter,
+                        order_by="timestamp desc",
+                        max_results=10,
+                    ))
+
+                try:
+                    context_entries = await asyncio.get_event_loop().run_in_executor(None, fetch_context_logs)
+                    context["recent_service_logs"] = [
+                        {
+                            "timestamp": str(e.timestamp),
+                            "severity": e.severity,
+                            "message": self._extract_error_summary(e)[:200],
+                        }
+                        for e in context_entries[:5]
+                    ]
+                except Exception as e:
+                    logger.debug(f"Context log fetch failed: {e}")
+
+        except Exception as e:
+            logger.warning(f"Error fetching GCP context: {e}")
+
+        return context
+
+    def _extract_error_summary(self, entry) -> str:
+        """Extract a short summary from a log entry."""
+        if hasattr(entry, 'payload'):
+            if isinstance(entry.payload, str):
+                return entry.payload[:100]
+            elif isinstance(entry.payload, dict):
+                msg = entry.payload.get('message') or entry.payload.get('error') or str(entry.payload)
+                return msg[:100] if isinstance(msg, str) else str(msg)[:100]
+        return "Unknown error"
+
+    def _extract_error_phrase(self, error_message: str) -> Optional[str]:
+        """Extract key phrase from error message for searching."""
+        # Get first line, strip common prefixes
+        first_line = error_message.split('\n')[0].strip()
+
+        # Remove prefixes
+        for prefix in ['Error:', 'ERROR:', 'panic:', 'FATAL:', 'error:']:
+            if first_line.startswith(prefix):
+                first_line = first_line[len(prefix):].strip()
+
+        # Take first 50 chars, avoid partial words
+        if len(first_line) > 50:
+            first_line = first_line[:50].rsplit(' ', 1)[0]
+
+        return first_line if len(first_line) > 10 else None
+
+    def _extract_service_from_entry(self, entry) -> str:
+        """Extract service name from a log entry."""
+        if hasattr(entry, 'resource') and entry.resource:
+            labels = entry.resource.labels or {}
+            return labels.get('service_name', 'unknown')
+        return 'unknown'
 
     @property
     def system_prompt(self) -> str:
@@ -64,8 +231,8 @@ class TriageAgent:
             self._system_prompt = get_triage_system_prompt()
         return self._system_prompt
 
-    def _format_incident(self, incident: Incident) -> str:
-        """Format an incident for Claude analysis."""
+    def _format_incident(self, incident: Incident, gcp_context: Optional[Dict[str, Any]] = None) -> str:
+        """Format an incident for Claude analysis, including GCP context."""
         parts = [
             f"## Incident: {incident.id}",
             f"**Title**: {incident.title}",
@@ -100,10 +267,53 @@ class TriageAgent:
                 f"**Tenant**: {incident.tenant_name}",
             ])
 
+        # Add GCP context if available
+        if gcp_context:
+            parts.extend(["", "### Additional Context from GCP Logs"])
+
+            # Error frequency
+            if gcp_context.get("error_frequency"):
+                freq = gcp_context["error_frequency"]
+                parts.extend([
+                    "",
+                    f"**Error Frequency (past hour)**: {freq.get('total_errors_past_hour', 0)} total errors, {freq.get('unique_error_types', 0)} unique types",
+                ])
+
+            # Related errors from same service
+            if gcp_context.get("related_errors"):
+                parts.extend(["", "**Related Errors in Same Service**:"])
+                for err in gcp_context["related_errors"][:5]:
+                    parts.append(f"- ({err['count']}x) {err['message']}")
+
+            # Similar errors across services
+            if gcp_context.get("similar_across_services"):
+                parts.extend(["", "**Same Error Across Services**:"])
+                for svc in gcp_context["similar_across_services"]:
+                    parts.append(f"- {svc['service']}: {svc['count']} occurrences")
+
+            # Recent logs for context
+            if gcp_context.get("recent_service_logs"):
+                parts.extend(["", "**Recent Service Activity**:"])
+                for log in gcp_context["recent_service_logs"][:3]:
+                    parts.append(f"- [{log['severity']}] {log['message']}")
+
         parts.extend([
             "",
             "---",
-            "Analyze this incident and provide your classification as JSON.",
+            "",
+            "## Instructions",
+            "",
+            "Based on the error details AND the additional GCP context above, provide your analysis.",
+            "The GCP context shows you:",
+            "- How frequently this error is occurring",
+            "- Whether it's happening across multiple services (widespread issue)",
+            "- What other activity is happening in the service around the same time",
+            "",
+            "Use this context to make a better-informed classification.",
+            "If this is a TRANSIENT error, explain what pattern indicates it will self-resolve.",
+            "If this is an INFRA_ISSUE, point to specific evidence from the logs.",
+            "",
+            "Respond with your classification as JSON.",
         ])
 
         return "\n".join(parts)
@@ -214,12 +424,15 @@ class TriageAgent:
 
         return result
 
-    async def analyze(self, incident: Incident) -> TriageResult:
+    async def analyze(self, incident: Incident, fetch_gcp_context: bool = True) -> TriageResult:
         """
         Analyze an incident and return triage result.
 
+        Enhanced to fetch additional context from GCP logs before analysis.
+
         Args:
             incident: The incident to analyze
+            fetch_gcp_context: Whether to fetch additional context from GCP logs (default True)
 
         Returns:
             TriageResult with classification and analysis
@@ -232,13 +445,29 @@ class TriageAgent:
 
         logger.info(f"Triaging incident {incident.id}: {incident.title}")
 
+        # Fetch GCP context for better triage
+        gcp_context = None
+        if fetch_gcp_context:
+            try:
+                logger.info(f"Fetching GCP context for {incident.id}...")
+                gcp_context = await self._fetch_gcp_context(incident)
+                if gcp_context.get("error_frequency"):
+                    freq = gcp_context["error_frequency"]
+                    logger.info(
+                        f"GCP context for {incident.id}: {freq.get('total_errors_past_hour', 0)} errors in past hour, "
+                        f"{len(gcp_context.get('similar_across_services', []))} other services affected"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to fetch GCP context for {incident.id}: {e}")
+                # Continue without context - don't block triage
+
         try:
             message = self.client.messages.create(
                 model=self.model,
                 max_tokens=4096,
                 system=self.system_prompt,
                 messages=[
-                    {"role": "user", "content": self._format_incident(incident)}
+                    {"role": "user", "content": self._format_incident(incident, gcp_context)}
                 ]
             )
 
@@ -246,6 +475,10 @@ class TriageAgent:
             logger.debug(f"Claude response for {incident.id}: {response_text[:500]}")
 
             result = self._parse_response(response_text, incident.id)
+
+            # Add GCP context to the result for display
+            if gcp_context:
+                result.gcp_context = gcp_context
 
             logger.info(
                 f"Triaged {incident.id}: {result.classification.value} "

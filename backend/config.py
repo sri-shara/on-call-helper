@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     verification_duration_hours: int = Field(2, description="Hours to monitor after deploy")
     verification_check_interval_minutes: int = Field(5, description="Check interval")
 
+    # ═══════════════ Storage ═══════════════
+    storage_backend: str = Field("memory", description="Storage backend: 'memory' or 'firestore'")
+
     # ═══════════════ Dashboard ═══════════════
     dashboard_url: str = Field("http://localhost:3000", description="Dashboard URL")
 

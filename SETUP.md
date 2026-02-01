@@ -146,6 +146,13 @@ GITHUB_BASE_BRANCH=main
 # GITHUB_TOKEN=ghp_xxxxx
 
 # ═══════════════════════════════════════════════════════════════
+# OPTIONAL - Storage Backend
+# ═══════════════════════════════════════════════════════════════
+# Options: 'memory' (default) or 'firestore' (persistent)
+# Use 'firestore' to persist incidents and agent decisions
+STORAGE_BACKEND=memory
+
+# ═══════════════════════════════════════════════════════════════
 # OPTIONAL - Additional Settings
 # ═══════════════════════════════════════════════════════════════
 DEBUG=true
@@ -157,6 +164,43 @@ CODERABBIT_MAX_RETRIES=3
 # Sandbox testing timeout (minutes)
 SANDBOX_TIMEOUT_MINUTES=15
 ```
+
+### Firestore Storage (Optional)
+
+To persist incidents and AI agent decisions across restarts:
+
+1. **Enable Firestore in your GCP project**:
+   ```bash
+   gcloud firestore databases create --location=nam5 --project=YOUR_PROJECT
+   ```
+
+2. **Set the storage backend**:
+   ```bash
+   STORAGE_BACKEND=firestore
+   ```
+
+3. **Collections created automatically**:
+   - `incidents` - Incident records
+   - `triage_results` - Claude AI triage decisions
+   - `fix_results` - Generated code fixes
+   - `test_results` - Sandbox test results
+   - `verification_results` - Production verification results
+   - `seen_gcp_ids` - Deduplication tracking
+
+4. **Query historical data via API**:
+   ```bash
+   # Get incidents by service
+   GET /history/by-service/alertservice
+
+   # Get incidents by classification
+   GET /history/by-classification/transient
+
+   # Get recent errors summary
+   GET /history/summary?hours=24
+
+   # Get all triage decisions
+   GET /history/triage-decisions
+   ```
 
 ### Verify Configuration
 
