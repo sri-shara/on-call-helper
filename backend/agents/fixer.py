@@ -217,27 +217,91 @@ Please generate an improved fix that addresses these issues.
             iteration=iteration,
         )
 
-    def _validate_fix(self, fix: FixResult, source_code: str) -> None:
+    def _normalize_whitespace(self, code: str) -> str:
+        """Normalize whitespace for comparison."""
+        lines = code.strip().split('\n')
+        # Strip trailing whitespace from each line, normalize to single spaces
+        normalized = []
+        for line in lines:
+            # Replace tabs with spaces, strip trailing whitespace
+            line = line.replace('\t', '    ').rstrip()
+            normalized.append(line)
+        return '\n'.join(normalized)
+
+    def _find_matching_code(self, source_code: str, original_code: str) -> Optional[str]:
+        """
+        Find the actual matching code in source, handling whitespace differences.
+
+        Returns the actual code from source that matches, or None if not found.
+        """
+        # First try exact match
+        if original_code in source_code:
+            return original_code
+
+        # Normalize both and try to find
+        normalized_original = self._normalize_whitespace(original_code)
+
+        # Try to find by normalizing source lines
+        source_lines = source_code.split('\n')
+        original_lines = normalized_original.split('\n')
+        num_original_lines = len(original_lines)
+
+        # Slide through source looking for matching block
+        for i in range(len(source_lines) - num_original_lines + 1):
+            candidate_lines = source_lines[i:i + num_original_lines]
+            normalized_candidate = self._normalize_whitespace('\n'.join(candidate_lines))
+
+            if normalized_candidate == normalized_original:
+                # Found it! Return the actual source lines
+                return '\n'.join(candidate_lines)
+
+        # Try fuzzy matching with difflib
+        import difflib
+
+        # Split source into chunks of similar size to original
+        original_line_count = len(original_lines)
+        best_match = None
+        best_ratio = 0.7  # Minimum 70% similarity threshold
+
+        for i in range(len(source_lines) - original_line_count + 1):
+            candidate = '\n'.join(source_lines[i:i + original_line_count])
+            ratio = difflib.SequenceMatcher(
+                None,
+                self._normalize_whitespace(candidate),
+                normalized_original
+            ).ratio()
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_match = candidate
+
+        if best_match and best_ratio > 0.85:  # High confidence match
+            logger.info(f"Found fuzzy match with {best_ratio:.0%} similarity")
+            return best_match
+
+        return None
+
+    def _validate_fix(self, fix: FixResult, source_code: str) -> Optional[str]:
         """
         Validate that the fix can be applied to the source.
+
+        Returns:
+            The actual matching code from source (may differ in whitespace)
 
         Raises:
             FixerError: If the fix is invalid
         """
-        # Check that original_code exists in source
-        if fix.original_code not in source_code:
-            # Try with normalized whitespace
-            normalized_source = " ".join(source_code.split())
-            normalized_original = " ".join(fix.original_code.split())
+        # Find the matching code in source
+        actual_match = self._find_matching_code(source_code, fix.original_code)
 
-            if normalized_original not in normalized_source:
-                raise FixerError(
-                    "original_code not found in source file. "
-                    "The fix cannot be applied."
-                )
+        if actual_match is None:
+            raise FixerError(
+                "original_code not found in source file. "
+                "The fix cannot be applied."
+            )
 
         # Check that fixed_code is different
-        if fix.original_code.strip() == fix.fixed_code.strip():
+        if self._normalize_whitespace(fix.original_code) == self._normalize_whitespace(fix.fixed_code):
             raise FixerError("fixed_code is identical to original_code")
 
         # Basic syntax check - ensure balanced braces
@@ -247,6 +311,8 @@ Please generate an improved fix that addresses these issues.
             raise FixerError(
                 f"Unbalanced braces in fixed_code: {open_braces} open, {close_braces} close"
             )
+
+        return actual_match
 
     async def generate_fix(
         self,
@@ -313,8 +379,13 @@ Please generate an improved fix that addresses these issues.
 
             fix = self._parse_response(response_text, triage.incident_id, iteration)
 
-            # Validate the fix
-            self._validate_fix(fix, source_code)
+            # Validate the fix and get the actual matching code from source
+            actual_match = self._validate_fix(fix, source_code)
+
+            # Update fix with the actual code from source (for accurate replacement)
+            if actual_match and actual_match != fix.original_code:
+                logger.info("Adjusted original_code to match actual source formatting")
+                fix.original_code = actual_match
 
             logger.info(
                 f"Generated fix for {triage.incident_id}: {fix.diff_summary}"
@@ -334,35 +405,34 @@ Please generate an improved fix that addresses these issues.
 
     async def _fetch_source_code(self, file_path: str) -> str:
         """
-        Fetch source code from GitHub.
+        Fetch source code from local Nucleus repository.
 
         Args:
-            file_path: Path to the file in the repository
+            file_path: Path to the file relative to repo root
 
         Returns:
             File content as string
 
         Raises:
-            FixerError: If file cannot be fetched
+            FixerError: If file cannot be read
         """
-        if not self.github:
-            # Create a default GitHub service
-            self.github = GitHubService()
+        # Read from local filesystem instead of GitHub API
+        local_path = settings.nucleus_repo_path / file_path
+
+        logger.debug(f"Reading source file from: {local_path}")
+
+        if not local_path.exists():
+            raise FixerError(f"File not found: {local_path}")
+
+        if not local_path.is_file():
+            raise FixerError(f"Path is not a file: {local_path}")
 
         try:
-            content = await self.github.get_file_content(file_path)
-
-            if content is None:
-                raise FixerError(f"File not found: {file_path}")
-
+            content = local_path.read_text(encoding="utf-8")
+            logger.debug(f"Successfully read {file_path} ({len(content)} chars)")
             return content
-
-        except GitHubError as e:
-            raise FixerError(f"Failed to fetch source code: {e}")
-        finally:
-            # Close the GitHub client
-            if self.github:
-                await self.github.close()
+        except Exception as e:
+            raise FixerError(f"Failed to read source code: {e}")
 
     def generate_fix_sync(
         self,

@@ -206,6 +206,189 @@ async def get_incident(incident_id: str):
     }
 
 
+@app.get("/incidents/all/details", tags=["Incidents"])
+async def get_all_incidents_with_details(status: Optional[str] = None, limit: int = 100):
+    """
+    Get all incidents with complete details (triage, fix, test, verification).
+    
+    Useful for displaying in a table view with all AI agent outputs.
+    """
+    from backend.models import IncidentStatus
+
+    status_filter = None
+    if status:
+        try:
+            status_filter = IncidentStatus(status)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"Invalid status: {status}"}
+            )
+
+    incidents = storage.list_incidents(status=status_filter, limit=limit)
+    
+    # Build response with all related data
+    result = []
+    for incident in incidents:
+        triage = storage.get_triage_result(incident.id)
+        fix = storage.get_fix_result(incident.id)
+        test = storage.get_test_result(incident.id)
+        verification = storage.get_verification_result(incident.id)
+        
+        result.append({
+            "incident": incident.model_dump(),
+            "triage": triage.model_dump() if triage else None,
+            "fix": fix.model_dump() if fix else None,
+            "test": test.model_dump() if test else None,
+            "verification": verification.model_dump() if verification else None,
+        })
+    
+    return {
+        "incidents": result,
+        "count": len(result),
+    }
+
+
+# ═══════════════ History & Analytics Endpoints ═══════════════
+
+
+@app.get("/history/by-service/{service_name}", tags=["History"])
+async def get_incidents_by_service(service_name: str, limit: int = 50):
+    """
+    Get incident history for a specific service.
+
+    Useful for understanding error patterns in a service.
+    """
+    # Check if using Firestore storage with query methods
+    if hasattr(storage, 'get_incidents_by_service'):
+        incidents = storage.get_incidents_by_service(service_name, limit)
+    else:
+        # Fallback for in-memory storage
+        all_incidents = storage.list_incidents(limit=500)
+        incidents = [i for i in all_incidents if i.service_name == service_name][:limit]
+
+    return {
+        "service": service_name,
+        "incidents": [i.model_dump() for i in incidents],
+        "count": len(incidents),
+    }
+
+
+@app.get("/history/by-classification/{classification}", tags=["History"])
+async def get_incidents_by_classification(classification: str, limit: int = 50):
+    """
+    Get incidents by their triage classification.
+
+    Classifications: fixable, infra_issue, transient, needs_human
+    """
+    from backend.models import TriageClassification
+
+    try:
+        classification_enum = TriageClassification(classification)
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid classification: {classification}. Use: fixable, infra_issue, transient, needs_human"}
+        )
+
+    # Check if using Firestore storage with query methods
+    if hasattr(storage, 'get_incidents_by_classification'):
+        results = storage.get_incidents_by_classification(classification_enum, limit)
+    else:
+        # Fallback for in-memory storage
+        all_incidents = storage.list_incidents(limit=500)
+        results = []
+        for incident in all_incidents:
+            triage = storage.get_triage_result(incident.id)
+            if triage and triage.classification == classification_enum:
+                results.append({
+                    "incident": incident,
+                    "triage": triage,
+                })
+        results = results[:limit]
+
+    return {
+        "classification": classification,
+        "results": [
+            {
+                "incident": r["incident"].model_dump() if hasattr(r["incident"], 'model_dump') else r["incident"],
+                "triage": r["triage"].model_dump() if hasattr(r["triage"], 'model_dump') else r["triage"],
+            }
+            for r in results
+        ],
+        "count": len(results),
+    }
+
+
+@app.get("/history/summary", tags=["History"])
+async def get_recent_errors_summary(hours: int = 24):
+    """
+    Get a summary of recent errors for reporting.
+
+    Returns counts by service, by status, and identifies the most affected service.
+    """
+    # Check if using Firestore storage with query methods
+    if hasattr(storage, 'get_recent_errors_summary'):
+        return storage.get_recent_errors_summary(hours)
+    else:
+        # Fallback for in-memory storage
+        from datetime import timedelta
+
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        all_incidents = storage.list_incidents(limit=500)
+
+        # Filter by time
+        recent = [i for i in all_incidents if i.created_at >= cutoff]
+
+        # Group by service
+        by_service = {}
+        by_status = {}
+
+        for incident in recent:
+            svc = incident.service_name
+            by_service[svc] = by_service.get(svc, 0) + 1
+            status = incident.status.value
+            by_status[status] = by_status.get(status, 0) + 1
+
+        return {
+            "total": len(recent),
+            "hours": hours,
+            "by_service": by_service,
+            "by_status": by_status,
+            "most_affected_service": max(by_service.keys(), key=lambda k: by_service[k]) if by_service else None,
+        }
+
+
+@app.get("/history/triage-decisions", tags=["History"])
+async def get_triage_decisions(limit: int = 50):
+    """
+    Get recent triage decisions with their reasoning.
+
+    Useful for reviewing and auditing AI decisions.
+    """
+    incidents = storage.list_incidents(limit=limit)
+
+    decisions = []
+    for incident in incidents:
+        triage = storage.get_triage_result(incident.id)
+        if triage:
+            decisions.append({
+                "incident_id": incident.id,
+                "title": incident.title,
+                "service": incident.service_name,
+                "classification": triage.classification.value,
+                "confidence": triage.confidence,
+                "root_cause": triage.root_cause,
+                "gcp_context": triage.gcp_context,
+                "created_at": incident.created_at.isoformat(),
+            })
+
+    return {
+        "decisions": decisions,
+        "count": len(decisions),
+    }
+
+
 # ═══════════════ Webhook Endpoints ═══════════════
 
 
@@ -279,7 +462,33 @@ async def receive_gcp_logs(request: Request):
 
         logger.info(f"Created incident {incident.id}: {incident.title}")
 
-        # TODO: Trigger pipeline processing (will be added in orchestrator PR)
+        # Broadcast to WebSocket clients
+        from backend.websocket_manager import ws_manager, create_pipeline_event_callback
+        await ws_manager.broadcast_incident_created(
+            incident_id=incident.id,
+            title=incident.title,
+            service=incident.service_name,
+            severity=incident.severity.value,
+        )
+
+        # Trigger pipeline processing in background
+        import asyncio
+        from backend.agents.orchestrator import PipelineOrchestrator
+
+        async def run_pipeline():
+            try:
+                callback = create_pipeline_event_callback()
+                orchestrator = PipelineOrchestrator(
+                    event_callback=lambda e: asyncio.create_task(callback(e)),
+                    skip_sandbox=True,  # Skip Kind cluster for now
+                    skip_verification=True,  # Skip production monitoring for now
+                )
+                result = await orchestrator.process_incident(incident)
+                logger.info(f"Pipeline completed for {incident.id}: success={result.success}")
+            except Exception as e:
+                logger.error(f"Pipeline failed for {incident.id}: {e}")
+
+        asyncio.create_task(run_pipeline())
 
         return {
             "status": "processing",
@@ -356,11 +565,131 @@ async def test_webhook(request: Request):
     incident = create_incident_from_log(log_entry)
     storage.save_incident(incident)
 
+    # Broadcast to WebSocket clients
+    from backend.websocket_manager import ws_manager, create_pipeline_event_callback
+    await ws_manager.broadcast_incident_created(
+        incident_id=incident.id,
+        title=incident.title,
+        service=incident.service_name,
+        severity=incident.severity.value,
+    )
+
+    # Trigger pipeline processing in background
+    import asyncio
+    from backend.agents.orchestrator import PipelineOrchestrator
+
+    async def run_pipeline():
+        try:
+            callback = create_pipeline_event_callback()
+            orchestrator = PipelineOrchestrator(
+                event_callback=lambda e: asyncio.create_task(callback(e)),
+                skip_sandbox=True,  # Skip Kind cluster for now
+                skip_verification=True,  # Skip production monitoring for now
+            )
+            result = await orchestrator.process_incident(incident)
+            logger.info(f"Pipeline completed for {incident.id}: success={result.success}")
+        except Exception as e:
+            logger.error(f"Pipeline failed for {incident.id}: {e}")
+
+    asyncio.create_task(run_pipeline())
+
     return {
         "status": "processing",
         "incident_id": incident.id,
         "title": incident.title,
         "severity": incident.severity.value,
+    }
+
+
+# ═══════════════ GCP Polling Endpoints ═══════════════
+
+
+# Global GCP logging service instance
+_gcp_service = None
+
+
+def get_gcp_service():
+    """Get or create the GCP logging service."""
+    global _gcp_service
+    if _gcp_service is None:
+        from backend.services.gcp_logging import GCPLoggingService
+        _gcp_service = GCPLoggingService()
+    return _gcp_service
+
+
+@app.post("/gcp/polling/start", tags=["GCP"])
+async def start_gcp_polling(interval_seconds: int = 30):
+    """
+    Start polling GCP Cloud Logging for errors.
+
+    This requires read access to GCP Cloud Logging (Logging Viewer role).
+    Errors will be automatically processed through the incident pipeline.
+    """
+    from backend.services.gcp_logging import GCPLoggingService, create_incident_from_log
+    from backend.websocket_manager import ws_manager, create_pipeline_event_callback
+    from backend.agents.orchestrator import PipelineOrchestrator
+    import asyncio
+
+    gcp_service = get_gcp_service()
+
+    if gcp_service.is_polling:
+        return {"status": "already_running", "message": "GCP polling is already active"}
+
+    async def process_incident(incident):
+        """Process a new incident from GCP logs."""
+        storage.save_incident(incident)
+
+        # Broadcast to WebSocket clients
+        await ws_manager.broadcast_incident_created(
+            incident_id=incident.id,
+            title=incident.title,
+            service=incident.service_name,
+            severity=incident.severity.value,
+        )
+
+        # Run pipeline
+        callback = create_pipeline_event_callback()
+        orchestrator = PipelineOrchestrator(
+            event_callback=lambda e: asyncio.create_task(callback(e)),
+            skip_sandbox=True,
+            skip_verification=True,
+        )
+        try:
+            result = await orchestrator.process_incident(incident)
+            logger.info(f"Pipeline completed for {incident.id}: success={result.success}")
+        except Exception as e:
+            logger.error(f"Pipeline failed for {incident.id}: {e}")
+
+    await gcp_service.start_polling(process_incident, interval_seconds)
+
+    return {
+        "status": "started",
+        "message": f"GCP polling started (every {interval_seconds}s)",
+        "project_id": gcp_service.project_id,
+        "filter": gcp_service.log_filter,
+    }
+
+
+@app.post("/gcp/polling/stop", tags=["GCP"])
+async def stop_gcp_polling():
+    """Stop polling GCP Cloud Logging."""
+    gcp_service = get_gcp_service()
+
+    if not gcp_service.is_polling:
+        return {"status": "not_running", "message": "GCP polling is not active"}
+
+    await gcp_service.stop_polling()
+    return {"status": "stopped", "message": "GCP polling stopped"}
+
+
+@app.get("/gcp/polling/status", tags=["GCP"])
+async def gcp_polling_status():
+    """Get current GCP polling status."""
+    gcp_service = get_gcp_service()
+    return {
+        "is_polling": gcp_service.is_polling,
+        "project_id": gcp_service.project_id,
+        "filter": gcp_service.log_filter,
     }
 
 

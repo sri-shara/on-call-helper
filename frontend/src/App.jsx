@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { IncidentProvider, useIncidents } from './context/IncidentContext'
 import { MetricsPanel } from './components/MetricsPanel'
 import { IncidentFeed } from './components/IncidentFeed'
+import { IncidentTable } from './components/IncidentTable'
 import { AgentThinking } from './components/AgentThinking'
 import { CodeDiff } from './components/CodeDiff'
 import { SandboxStatus } from './components/SandboxStatus'
@@ -11,8 +12,10 @@ import { VerificationStatus } from './components/VerificationStatus'
  * Main dashboard layout component.
  */
 function Dashboard() {
-  const { incidents, connectionStatus, error } = useIncidents()
+  const { incidents, isConnected, error } = useIncidents()
+  const connectionStatus = isConnected ? 'connected' : 'disconnected'
   const [selectedIncidentId, setSelectedIncidentId] = useState(null)
+  const [viewMode, setViewMode] = useState('dashboard') // 'dashboard' or 'table'
 
   const selectedIncident = selectedIncidentId ? incidents[selectedIncidentId] : null
 
@@ -65,8 +68,40 @@ function Dashboard() {
           <MetricsPanel />
         </div>
 
-        {/* Main Grid */}
-        <div className="grid grid-cols-12 gap-6">
+        {/* View Mode Toggle */}
+        <div className="mb-6 flex items-center gap-4">
+          <button
+            onClick={() => setViewMode('dashboard')}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              viewMode === 'dashboard'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+            }`}
+          >
+            Dashboard View
+          </button>
+          <button
+            onClick={() => setViewMode('table')}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              viewMode === 'table'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+            }`}
+          >
+            Table View
+          </button>
+        </div>
+
+        {/* Table View */}
+        {viewMode === 'table' && (
+          <div className="mb-6">
+            <IncidentTable />
+          </div>
+        )}
+
+        {/* Dashboard View */}
+        {viewMode === 'dashboard' && (
+          <div className="grid grid-cols-12 gap-6">
           {/* Left Column - Incidents & Agent Activity */}
           <div className="col-span-12 lg:col-span-4 space-y-6">
             <IncidentFeed
@@ -174,6 +209,7 @@ function Dashboard() {
             </div>
           </div>
         </div>
+        )}
       </main>
 
       {/* Footer */}

@@ -742,13 +742,13 @@ class GitHubService:
         repo: Optional[str] = None,
     ) -> PullRequest:
         """
-        Create a complete PR for an incident fix.
+        Create a complete PR for an incident fix using local git + gh CLI.
 
-        This is a convenience method that:
-        1. Creates a branch
-        2. Updates the file with the fix
-        3. Creates a draft PR with full documentation
-        4. Adds labels
+        This method:
+        1. Creates a branch locally
+        2. Applies the fix to the local file
+        3. Commits and pushes to origin
+        4. Creates a draft PR using gh CLI
 
         Args:
             incident_id: On Call Helper incident ID (e.g., "OCH-12345678")
@@ -761,7 +761,7 @@ class GitHubService:
             service_name: Affected Nucleus service
             confidence: Triage confidence score (0-1)
             test_results: Optional test results dict
-            repo: Repository override
+            repo: Repository override (unused - uses local repo)
 
         Returns:
             PullRequest object
@@ -769,9 +769,13 @@ class GitHubService:
         Raises:
             GitHubError: If any step fails
         """
-        target_repo = repo or self.repo
-        if not target_repo:
-            raise GitHubError("No repository specified")
+        import subprocess
+        import tempfile
+        from backend.config import settings
+
+        repo_path = settings.nucleus_repo_path
+        if not repo_path.exists():
+            raise GitHubError(f"Nucleus repo not found at: {repo_path}")
 
         # Generate branch name
         incident_short = incident_id.replace("OCH-", "").lower()[:8]
@@ -779,84 +783,133 @@ class GitHubService:
 
         logger.info(f"Creating fix PR for {incident_id}: {branch_name}")
 
-        # Step 1: Create branch from main
-        default_branch = await self.get_default_branch(target_repo)
-
-        # Check if branch already exists
-        existing = await self.get_branch(branch_name, target_repo)
-        if existing:
-            raise GitHubError(
-                f"Branch '{branch_name}' already exists. "
-                f"A fix may already be in progress for {incident_id}."
+        def run_git(cmd: list, check: bool = True) -> subprocess.CompletedProcess:
+            """Run a git command in the repo directory."""
+            result = subprocess.run(
+                cmd,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
             )
-
-        await self.create_branch(branch_name, from_ref=default_branch, repo=target_repo)
-
-        # Step 2: Get current file and apply fix
-        current_content = await self.get_file_content(
-            file_path, ref=default_branch, repo=target_repo
-        )
-
-        if current_content is None:
-            raise GitHubError(f"File not found: {file_path}")
-
-        if original_code not in current_content:
-            raise GitHubError(
-                f"Original code not found in {file_path}. "
-                "The file may have changed since triage."
-            )
-
-        new_content = current_content.replace(original_code, fixed_code)
-
-        # Step 3: Commit the fix
-        commit_message = f"fix: {incident_title[:50]}\n\nAuto-generated fix for {incident_id} by On Call Helper"
-
-        await self.update_file(
-            path=file_path,
-            content=new_content,
-            message=commit_message,
-            branch=branch_name,
-            repo=target_repo,
-        )
-
-        # Step 4: Generate PR body
-        pr_body = self._generate_pr_body(
-            incident_id=incident_id,
-            incident_title=incident_title,
-            file_path=file_path,
-            original_code=original_code,
-            fixed_code=fixed_code,
-            root_cause=root_cause,
-            fix_explanation=fix_explanation,
-            service_name=service_name,
-            confidence=confidence,
-            test_results=test_results,
-        )
-
-        # Step 5: Create PR
-        pr_title = f"[On Call Helper] Fix: {incident_title[:50]}"
-        pr = await self.create_pull_request(
-            title=pr_title,
-            body=pr_body,
-            head=branch_name,
-            base=default_branch,
-            draft=True,
-            repo=target_repo,
-        )
-
-        # Step 6: Add labels
-        labels = ["oncall-helper", "auto-fix"]
-        if test_results and test_results.get("passed"):
-            labels.append("tests-passed")
+            if check and result.returncode != 0:
+                raise GitHubError(f"Git command failed: {' '.join(cmd)}\n{result.stderr}")
+            return result
 
         try:
-            await self.add_labels_to_pr(pr.number, labels, repo=target_repo)
-        except GitHubError as e:
-            # Labels are nice-to-have, don't fail the PR
-            logger.warning(f"Failed to add labels: {e}")
+            # Step 1: Ensure we're on main and up to date
+            run_git(["git", "checkout", "main"])
+            run_git(["git", "pull", "origin", "main"])
 
-        logger.info(f"Created PR #{pr.number}: {pr.html_url}")
-        return pr
+            # Step 2: Create and checkout new branch
+            # First check if branch exists
+            result = run_git(["git", "branch", "--list", branch_name], check=False)
+            if branch_name in result.stdout:
+                raise GitHubError(
+                    f"Branch '{branch_name}' already exists. "
+                    f"A fix may already be in progress for {incident_id}."
+                )
+
+            run_git(["git", "checkout", "-b", branch_name])
+
+            # Step 3: Apply the fix to the local file
+            local_file = repo_path / file_path
+            if not local_file.exists():
+                raise GitHubError(f"File not found: {local_file}")
+
+            current_content = local_file.read_text(encoding="utf-8")
+
+            if original_code not in current_content:
+                raise GitHubError(
+                    f"Original code not found in {file_path}. "
+                    "The file may have changed since triage."
+                )
+
+            new_content = current_content.replace(original_code, fixed_code)
+            local_file.write_text(new_content, encoding="utf-8")
+
+            # Step 4: Stage and commit
+            run_git(["git", "add", file_path])
+
+            commit_message = f"fix: {incident_title[:50]}\n\nAuto-generated fix for {incident_id} by On Call Helper"
+            run_git(["git", "commit", "-m", commit_message])
+
+            # Step 5: Push to origin
+            run_git(["git", "push", "-u", "origin", branch_name])
+
+            # Step 6: Create PR using gh CLI
+            pr_title = f"[On Call Helper] Fix: {incident_title[:50]}"
+            pr_body = self._generate_pr_body(
+                incident_id=incident_id,
+                incident_title=incident_title,
+                file_path=file_path,
+                original_code=original_code,
+                fixed_code=fixed_code,
+                root_cause=root_cause,
+                fix_explanation=fix_explanation,
+                service_name=service_name,
+                confidence=confidence,
+                test_results=test_results,
+            )
+
+            # Write body to temp file to handle special characters
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+                f.write(pr_body)
+                body_file = f.name
+
+            try:
+                result = subprocess.run(
+                    [
+                        "gh", "pr", "create",
+                        "--title", pr_title,
+                        "--body-file", body_file,
+                        "--draft",
+                        "--base", "main",
+                        "--head", branch_name,
+                    ],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                )
+
+                if result.returncode != 0:
+                    raise GitHubError(f"Failed to create PR: {result.stderr}")
+
+                # Parse PR URL from output
+                pr_url = result.stdout.strip()
+                logger.info(f"Created PR: {pr_url}")
+
+                # Extract PR number from URL
+                pr_number = int(pr_url.split("/")[-1]) if pr_url else 0
+
+            finally:
+                import os
+                os.unlink(body_file)
+
+            return PullRequest(
+                number=pr_number,
+                url=pr_url,
+                html_url=pr_url,
+                title=pr_title,
+                body=pr_body,
+                state="open",
+                head_branch=branch_name,
+                base_branch="main",
+                draft=True,
+                created_at=datetime.utcnow(),
+                labels=["oncall-helper", "auto-fix"],
+            )
+
+        except GitHubError:
+            # Re-raise GitHubErrors as-is
+            raise
+        except Exception as e:
+            raise GitHubError(f"Failed to create PR: {e}")
+        finally:
+            # Always return to main branch
+            try:
+                run_git(["git", "checkout", "main"], check=False)
+            except Exception:
+                pass
 
     def _generate_pr_body(
         self,

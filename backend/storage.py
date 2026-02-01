@@ -181,5 +181,26 @@ class Storage:
         self._total_resolution_time_ms = 0
 
 
-# Global storage instance
-storage = Storage()
+# Global storage instance - choose backend based on config
+def _create_storage():
+    """Create storage instance based on configuration."""
+    from backend.config import settings
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    if settings.storage_backend == "firestore":
+        try:
+            from backend.storage_firestore import FirestoreStorage
+            logger.info("Using Firestore storage backend")
+            return FirestoreStorage()
+        except ImportError as e:
+            logger.warning(f"Firestore not available ({e}), falling back to memory storage")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Firestore ({e}), falling back to memory storage")
+
+    logger.info("Using in-memory storage backend")
+    return Storage()
+
+
+storage = _create_storage()

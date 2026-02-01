@@ -1,113 +1,112 @@
 # On Call Helper
 
-AI-powered incident response agent for the Nucleus MDR platform. Automatically triages production errors, generates fixes, and creates PRs.
+AI-powered incident response agent for the Nucleus MDR platform. Automatically monitors GCP Cloud Logging for production errors, triages them using Claude AI, generates fixes, and creates PRs - reducing MTTR from hours to minutes.
 
-## Overview
+## How It Works
 
-On Call Helper monitors GCP Cloud Logging for production errors in Nucleus services, uses Claude AI to analyze and classify incidents, generates code fixes, and creates pull requests - all automatically.
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  GCP Cloud      │────>│   On Call       │────>│   GitHub PR     │
+│  Logging        │     │   Helper        │     │   (via git)     │
+└─────────────────┘     └────────┬────────┘     └─────────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        │                       │                       │
+        v                       v                       v
+┌───────────────┐      ┌─────────────────┐     ┌───────────────┐
+│ Claude AI     │      │ Local Nucleus   │     │ Real-time     │
+│ (Triage/Fix)  │      │ Repository      │     │ Dashboard     │
+└───────────────┘      └─────────────────┘     └───────────────┘
+```
 
-## Features (Current)
+When an error is detected in GCP Cloud Logging:
 
-- **Error Ingestion**: Receives errors via GCP Pub/Sub webhook
-- **Transient Error Filtering**: Skips self-healing errors (timeouts, rate limits, etc.)
-- **Tenant Filtering**: Ignores demo/test tenant errors
-- **SRE Knowledge Loading**: Embeds triage procedures and runbooks from oncall repo
-- **Metrics Dashboard**: Track incidents, MTTR, success rate
+1. **Triage** - Claude AI analyzes the error, stack trace, and service context
+2. **Classify** - Determines if it's FIXABLE, TRANSIENT, INFRA_ISSUE, or NEEDS_HUMAN
+3. **Fix** - For fixable errors, reads local Nucleus repo and generates a code fix
+4. **Review** - Optional CodeRabbit review with retry loop
+5. **PR** - Creates a branch, commits the fix, and opens a draft PR via `git` + `gh` CLI
+
+## Features
+
+- **GCP Polling Mode** - Queries Cloud Logging API directly (read-only access required)
+- **Real-time Dashboard** - React frontend with WebSocket updates
+- **Smart Triage** - Recognizes transient errors (retries, rate limits, etc.)
+- **Local Git Workflow** - Reads files from local repo, creates PRs via `gh` CLI
+- **Fuzzy Code Matching** - Handles whitespace differences in generated fixes
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.9+
-- Virtual environment
-
-### Setup
-
 ```bash
-# Clone the repo
-git clone <repo-url>
+# 1. Clone and setup
+git clone https://github.com/your-org/on-call-helper.git
 cd on-call-helper
-
-# Create virtual environment
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 
-# Copy environment file
+# 2. Install frontend dependencies
+cd frontend && npm install && cd ..
+
+# 3. Configure environment
 cp .env.example .env
-# Edit .env with your settings
+# Edit .env with your API keys (see SETUP.md for details)
+
+# 4. Start backend (port 8001 to avoid conflicts)
+PORT=8001 python -m backend.main
+
+# 5. Start frontend (in another terminal)
+cd frontend && npm run dev
+
+# 6. Open dashboard
+open http://localhost:5173
 ```
 
-### Run the Server
+## Key Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health check |
+| `GET /incidents` | List all incidents |
+| `POST /webhook/test` | Send test incident |
+| `POST /gcp/polling/start` | Start GCP log polling |
+| `POST /gcp/polling/stop` | Stop GCP log polling |
+| `GET /gcp/polling/status` | Check polling status |
+| `WS /ws` | WebSocket for real-time updates |
+| `GET /docs` | API documentation |
+
+## Documentation
+
+- **[SETUP.md](SETUP.md)** - Detailed setup and configuration guide
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design documentation
+
+## Example: Send a Test Incident
 
 ```bash
-# Activate venv
-source venv/bin/activate
-
-# Start the server
-uvicorn backend.main:app --reload --port 8000
-```
-
-### API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/live` | GET | Kubernetes liveness probe |
-| `/ready` | GET | Kubernetes readiness probe |
-| `/info` | GET | App info and configuration |
-| `/metrics` | GET | Dashboard metrics |
-| `/incidents` | GET | List incidents |
-| `/incidents/{id}` | GET | Get incident details |
-| `/webhook/gcp-logging` | POST | GCP Pub/Sub webhook |
-| `/webhook/test` | POST | Test webhook (no Pub/Sub envelope) |
-
-### Test the Webhook
-
-```bash
-# Send a test error
-curl -X POST http://localhost:8000/webhook/test \
+curl -X POST http://localhost:8001/webhook/test \
   -H "Content-Type: application/json" \
   -d '{
-    "error_message": "NullPointerException in caseservice",
-    "service_name": "caseservice",
-    "severity": "ERROR",
-    "stack_trace": "goroutine 1 [running]:\nmain.processCase()\n\t/backend/services/caseservice/handler.go:142"
+    "error_message": "nil pointer dereference in ProcessAlert",
+    "service_name": "alertservice",
+    "tenant_name": "Acme Corp",
+    "file_path": "backend/services/alertservice/alert_service.go"
   }'
-
-# Check it was created
-curl http://localhost:8000/incidents
 ```
 
-### Check Knowledge Loading
+## Example: Start GCP Polling
 
 ```bash
-# Python REPL
-source venv/bin/activate
-python3
+# Authenticate with GCP first
+gcloud auth application-default login
 
->>> from backend.knowledge import load_sre_knowledge, get_triage_system_prompt
->>> knowledge = load_sre_knowledge()
->>> print(f"Loaded {knowledge.files_loaded} files from {knowledge.loaded_from}")
->>> print(f"Missing: {knowledge.files_missing}")
-```
+# Start polling (every 30 seconds)
+curl -X POST "http://localhost:8001/gcp/polling/start?interval_seconds=30"
 
-## Running Tests
+# Check status
+curl http://localhost:8001/gcp/polling/status
 
-```bash
-# Activate venv
-source venv/bin/activate
-
-# Run all tests
-pytest tests/ -v
-
-# Run specific test file
-pytest tests/test_filters.py -v
-
-# Run with coverage
-pytest tests/ --cov=backend --cov-report=term-missing
+# Stop polling
+curl -X POST http://localhost:8001/gcp/polling/stop
 ```
 
 ## Project Structure
@@ -115,76 +114,36 @@ pytest tests/ --cov=backend --cov-report=term-missing
 ```
 on-call-helper/
 ├── backend/
-│   ├── main.py              # FastAPI app
+│   ├── main.py              # FastAPI application
 │   ├── config.py            # Environment configuration
-│   ├── storage.py           # In-memory storage
-│   ├── models/
-│   │   └── incident.py      # Pydantic data models
-│   ├── filters/
-│   │   ├── transient.py     # Transient error detection
-│   │   └── tenant.py        # Demo tenant filtering
+│   ├── agents/
+│   │   ├── triage.py        # Claude AI triage agent
+│   │   ├── fixer.py         # Claude AI fix generator
+│   │   └── orchestrator.py  # Pipeline coordinator
 │   ├── services/
-│   │   └── gcp_logging.py   # GCP Pub/Sub webhook handling
-│   └── knowledge/
-│       └── loader.py        # SRE knowledge loader
-├── tests/
-│   ├── test_models.py
-│   ├── test_storage.py
-│   ├── test_health.py
-│   ├── test_filters.py
-│   ├── test_gcp_logging.py
-│   └── test_knowledge_loader.py
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yaml
-└── .env.example
+│   │   ├── gcp_logging.py   # GCP Cloud Logging integration
+│   │   ├── github.py        # Git + gh CLI for PRs
+│   │   └── coderabbit.py    # Code review integration
+│   └── websocket_manager.py # Real-time event broadcasting
+├── frontend/
+│   ├── src/
+│   │   ├── App.jsx          # Dashboard UI
+│   │   └── context/         # State management
+│   └── vite.config.js       # Dev server config
+├── .env.example             # Environment template
+├── requirements.txt         # Python dependencies
+└── SETUP.md                 # Setup guide
 ```
 
-## Environment Variables
+## Requirements
 
-Key configuration (see `.env.example` for all options):
+- Python 3.9+
+- Node.js 18+
+- GCP account with Cloud Logging read access
+- Anthropic API key (for Claude AI)
+- GitHub CLI (`gh`) authenticated
+- Local clone of Nucleus repository
 
-```bash
-# Required for AI features
-ANTHROPIC_API_KEY=your-api-key
+## License
 
-# GCP (for production webhook)
-GCP_PROJECT_ID=your-project
-
-# GitHub (for PR creation)
-GITHUB_TOKEN=your-token
-GITHUB_REPO=owner/repo
-
-# Repository paths
-NUCLEUS_REPO_PATH=/path/to/nucleus
-ONCALL_REPO_PATH=/path/to/oncall
-```
-
-## Architecture
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design documentation.
-
-## PR Plan
-
-See [PR_PLAN.md](PR_PLAN.md) for the implementation roadmap broken into 16 testable PRs.
-
-## Current Status
-
-- [x] PR 1: Project setup and data models
-- [x] PR 2: Transient error and tenant filters
-- [x] PR 3: GCP Cloud Logging error ingestion
-- [x] PR 4: SRE knowledge loader
-- [ ] PR 5: Triage agent (in progress)
-- [ ] PR 6-16: Remaining features
-
-## Test Coverage
-
-```
-138 tests passing
-- Models: 16 tests
-- Storage: 18 tests
-- Health/API: 9 tests
-- Filters: 53 tests
-- GCP Logging: 24 tests
-- Knowledge Loader: 18 tests
-```
+MIT

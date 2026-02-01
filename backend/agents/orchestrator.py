@@ -266,15 +266,38 @@ class PipelineOrchestrator:
 
         result = await self.triage_agent.analyze(incident)
 
+        # Build triage event data
+        triage_data = {
+            "classification": result.classification.value,
+            "confidence": result.confidence,
+            "root_cause": result.root_cause,
+        }
+
+        # Include GCP context if available
+        if result.gcp_context:
+            triage_data["gcp_context"] = result.gcp_context
+            if result.gcp_context.get("error_frequency"):
+                freq = result.gcp_context["error_frequency"]
+                triage_data["error_count_past_hour"] = freq.get("total_errors_past_hour", 0)
+            if result.gcp_context.get("similar_across_services"):
+                triage_data["affected_services"] = [
+                    s["service"] for s in result.gcp_context["similar_across_services"]
+                ]
+
+        # Include actionable info for non-fixable classifications
+        if result.classification == TriageClassification.INFRA_ISSUE:
+            if result.runbook_reference:
+                triage_data["runbook"] = result.runbook_reference
+            if result.manual_steps:
+                triage_data["manual_steps"] = result.manual_steps
+        elif result.classification == TriageClassification.TRANSIENT:
+            triage_data["action"] = "Monitor - error is self-healing"
+
         self._emit_event(
             incident.id,
             PipelineStage.TRIAGING,
             f"Triage complete: {result.classification.value} (confidence: {result.confidence:.0%})",
-            data={
-                "classification": result.classification.value,
-                "confidence": result.confidence,
-                "root_cause": result.root_cause,
-            },
+            data=triage_data,
         )
 
         return result
@@ -853,20 +876,77 @@ class PipelineOrchestrator:
         self,
         triage: TriageResult,
     ) -> str:
-        """Get escalation message for non-fixable classification."""
+        """
+        Get escalation message for non-fixable classification.
+
+        Enhanced to provide actionable information from GCP context.
+        """
+        message_parts = []
+
         if triage.classification == TriageClassification.INFRA_ISSUE:
-            message = f"Infrastructure issue detected: {triage.root_cause}"
+            message_parts.append(f"**Infrastructure Issue Detected**")
+            message_parts.append(f"Root Cause: {triage.root_cause}")
+
+            # Add GCP context if available
+            if triage.gcp_context:
+                if triage.gcp_context.get("error_frequency"):
+                    freq = triage.gcp_context["error_frequency"]
+                    message_parts.append(
+                        f"Error Frequency: {freq.get('total_errors_past_hour', 0)} errors in past hour"
+                    )
+                if triage.gcp_context.get("similar_across_services"):
+                    services = [s["service"] for s in triage.gcp_context["similar_across_services"]]
+                    message_parts.append(f"Affected Services: {', '.join(services)}")
+
             if triage.runbook_reference:
-                message += f"\nRunbook: {triage.runbook_reference}"
+                message_parts.append(f"Runbook: {triage.runbook_reference}")
             if triage.manual_steps:
-                message += f"\nSteps: {', '.join(triage.manual_steps[:3])}"
-            return message
+                message_parts.append("Recommended Steps:")
+                for i, step in enumerate(triage.manual_steps[:5], 1):
+                    message_parts.append(f"  {i}. {step}")
+
+            return "\n".join(message_parts)
 
         elif triage.classification == TriageClassification.TRANSIENT:
-            return f"Transient error (self-healing): {triage.root_cause}"
+            message_parts.append("**Transient Error (Self-Healing)**")
+            message_parts.append(f"Analysis: {triage.root_cause}")
+
+            # Add context about frequency if available
+            if triage.gcp_context:
+                if triage.gcp_context.get("error_frequency"):
+                    freq = triage.gcp_context["error_frequency"]
+                    total = freq.get("total_errors_past_hour", 0)
+                    unique = freq.get("unique_error_types", 0)
+                    message_parts.append(
+                        f"Pattern: {total} occurrences in past hour ({unique} unique error types)"
+                    )
+                if triage.gcp_context.get("related_errors"):
+                    message_parts.append("Related Errors:")
+                    for err in triage.gcp_context["related_errors"][:3]:
+                        message_parts.append(f"  - ({err['count']}x) {err['message']}")
+
+            message_parts.append("")
+            message_parts.append("Action: No code change needed. Monitor for persistence.")
+            message_parts.append("Escalate if: Error rate increases or doesn't resolve within 1 hour.")
+
+            return "\n".join(message_parts)
 
         elif triage.classification == TriageClassification.NEEDS_HUMAN:
-            return f"Requires human investigation: {triage.root_cause}"
+            message_parts.append("**Requires Human Investigation**")
+            message_parts.append(f"Analysis: {triage.root_cause}")
+
+            if triage.gcp_context:
+                if triage.gcp_context.get("recent_service_logs"):
+                    message_parts.append("Recent Service Activity:")
+                    for log in triage.gcp_context["recent_service_logs"][:3]:
+                        message_parts.append(f"  [{log['severity']}] {log['message']}")
+
+            if triage.related_context:
+                message_parts.append("Additional Context:")
+                for ctx in triage.related_context[:5]:
+                    message_parts.append(f"  - {ctx}")
+
+            return "\n".join(message_parts)
 
         return f"Not fixable: {triage.root_cause}"
 

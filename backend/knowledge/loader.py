@@ -229,6 +229,20 @@ You must respond with a JSON object containing your analysis:
 4. **Reference runbooks**: If it's an infrastructure issue, point to the relevant runbook
 5. **Confidence score**: Be honest about certainty. Use 0.9+ only for clear-cut cases
 6. **Minimal fixes**: For FIXABLE issues, suggest the smallest change that fixes the problem
+7. **Use the GCP context**: You are provided with additional GCP log context - USE IT to make better decisions.
+   - If errors are widespread across services, it's likely INFRA_ISSUE
+   - If error frequency is high and consistent, it may be TRANSIENT or INFRA
+   - If the error is isolated to one service, it may be FIXABLE
+8. **Never say "need more details"**: You have access to GCP logs. If you need more context, examine what's provided.
+   Always provide actionable recommendations based on the evidence you have.
+9. **Inform, don't block**: Not everything needs a code fix. For TRANSIENT errors, explain:
+   - What pattern indicates it's transient
+   - What the user should monitor
+   - When they should escalate if it persists
+10. **For INFRA_ISSUE**: Always provide:
+    - The specific infrastructure component affected
+    - The runbook or manual steps to investigate
+    - What metrics or logs to watch
 '''
 
 
