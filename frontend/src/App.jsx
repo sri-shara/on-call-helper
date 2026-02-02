@@ -370,10 +370,12 @@ function IncidentDetail({ incidentId }) {
           <div className="flex items-center gap-3">
             {/* Show Resolve button for incidents needing human action (not already fixed) */}
             {(() => {
-              const needsReview = triage?.classification === 'needs_human' ||
-                                  triage?.classification === 'infra_issue' ||
-                                  incident.status === 'escalated'
-              const notFixed = incident.status !== 'fixed' && incident.status !== 'pr_created'
+              const cls = triage?.classification
+              const status = incident.status
+              const needsReview = cls === 'needs_human' || cls === 'infra_issue' || status === 'escalated'
+              const notFixed = status !== 'fixed' && status !== 'pr_created'
+              // Debug: log values
+              console.log('Resolve button check:', { cls, status, needsReview, notFixed, show: needsReview && notFixed })
               return needsReview && notFixed
             })() && (
               <button
