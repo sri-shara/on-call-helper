@@ -72,6 +72,10 @@ class Settings(BaseSettings):
         description="GCP project ID for Firestore (if different from gcp_project_id). "
                     "Useful when Cloud Logging is in one project and Firestore in another."
     )
+    firestore_database_id: str = Field(
+        "oncall-helper-db",
+        description="Firestore database ID. Use '(default)' for default database."
+    )
 
     # ═══════════════ Dashboard ═══════════════
     dashboard_url: str = Field("http://localhost:3000", description="Dashboard URL")

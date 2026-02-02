@@ -67,6 +67,7 @@ class FirestoreStorage:
             or settings.firestore_project_id
             or settings.gcp_project_id
         )
+        self.database_id = settings.firestore_database_id or "(default)"
         self._db: Optional[firestore.Client] = None
 
         # Local cache for deduplication (also backed by Firestore)
@@ -77,8 +78,11 @@ class FirestoreStorage:
     def db(self) -> firestore.Client:
         """Get or create Firestore client."""
         if self._db is None:
-            self._db = firestore.Client(project=self.project_id)
-            logger.info(f"Connected to Firestore project: {self.project_id}")
+            self._db = firestore.Client(
+                project=self.project_id,
+                database=self.database_id
+            )
+            logger.info(f"Connected to Firestore project: {self.project_id}, database: {self.database_id}")
         return self._db
 
     def _load_seen_ids_cache(self) -> None:
