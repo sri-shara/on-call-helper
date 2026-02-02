@@ -285,6 +285,7 @@ async def resolve_incident(incident_id: str):
     Use this for escalated incidents that have been manually addressed.
     """
     from backend.websocket_manager import ws_manager
+    from backend.models import IncidentStatus
     from datetime import datetime
 
     incident = storage.get_incident(incident_id)
