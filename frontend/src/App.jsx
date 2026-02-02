@@ -304,6 +304,8 @@ function IncidentDetail({ incidentId }) {
       const res = await fetch(`/api/incidents/${incidentId}/resolve`, { method: 'POST' })
       if (!res.ok) throw new Error('Failed to resolve incident')
 
+      console.log('Resolving incident:', incidentId)
+
       // Update local detail state
       setDetails(prev => ({
         ...prev,
@@ -312,9 +314,11 @@ function IncidentDetail({ incidentId }) {
 
       // Update the incident in the list (context state)
       updateIncident(incidentId, { status: 'fixed' })
+      console.log('Updated incident status to fixed')
 
       // Refresh metrics from server
       await refreshMetrics()
+      console.log('Metrics refreshed')
     } catch (err) {
       console.error('Failed to resolve:', err)
     } finally {
@@ -761,10 +765,23 @@ function Dashboard() {
     if (filter !== 'all') {
       list = list.filter(inc => {
         const classification = inc.triage?.classification || inc.escalation?.classification
-        if (filter === 'fixed') return inc.status === 'fixed' || inc.status === 'pr_created'
-        if (filter === 'processing') return ['active', 'triaging', 'fixing', 'testing', 'reviewing'].includes(inc.status)
-        if (filter === 'escalated') return inc.status === 'escalated'
-        if (filter === 'self-healing') return classification === 'transient'
+        const status = inc.status
+
+        if (filter === 'fixed') {
+          return status === 'fixed' || status === 'pr_created'
+        }
+        if (filter === 'processing') {
+          return ['active', 'triaging', 'fixing', 'testing', 'reviewing', 'verifying'].includes(status)
+        }
+        if (filter === 'escalated') {
+          // Review = escalated OR (needs human attention AND not yet fixed)
+          const needsReview = classification === 'needs_human' || classification === 'infra_issue'
+          const notFixed = status !== 'fixed' && status !== 'pr_created'
+          return status === 'escalated' || (needsReview && notFixed)
+        }
+        if (filter === 'self-healing') {
+          return classification === 'transient'
+        }
         return true
       })
     }
