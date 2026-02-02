@@ -254,10 +254,10 @@ function CodeBlock({ code, variant = 'neutral', maxHeight = '200px' }) {
 
   return (
     <pre
-      className={`p-3 rounded-lg border text-xs font-mono overflow-auto ${variants[variant]}`}
+      className={`p-3 rounded-lg border text-xs font-mono overflow-auto whitespace-pre-wrap break-words ${variants[variant]}`}
       style={{ maxHeight }}
     >
-      <code className={textColors[variant]}>{code}</code>
+      <code className={`${textColors[variant]} break-words`}>{code}</code>
     </pre>
   )
 }
@@ -367,9 +367,9 @@ function IncidentDetail({ incidentId }) {
             </h2>
             <p className="text-xs text-slate-500 font-mono mt-0.5">{incident.id}</p>
           </div>
-          <div className="flex items-center gap-3">
-            {/* Show Resolve button - always visible for non-fixed, non-fixable incidents */}
-            {incident.status !== 'fixed' && incident.status !== 'pr_created' && !incident.pr_url && triage?.classification !== 'fixable' && (
+          <div className="flex items-center gap-3 flex-shrink-0">
+            {/* Resolve button - show for all non-fixed incidents */}
+            {incident.status !== 'fixed' && (
               <button
                 onClick={handleResolve}
                 disabled={resolving}
@@ -423,7 +423,7 @@ function IncidentDetail({ incidentId }) {
               {/* Root Cause */}
               <div>
                 <h4 className="text-xs font-medium text-slate-400 mb-2">Root Cause</h4>
-                <div className="bg-slate-800/50 rounded-lg p-3 text-sm text-slate-300 leading-relaxed">
+                <div className="bg-slate-800/50 rounded-lg p-3 text-sm text-slate-300 leading-relaxed break-words overflow-hidden">
                   {triage.root_cause}
                 </div>
               </div>
@@ -438,7 +438,7 @@ function IncidentDetail({ incidentId }) {
               {triage.suggested_fix && (
                 <div>
                   <h4 className="text-xs font-medium text-slate-400 mb-2">Suggested Approach</h4>
-                  <div className="bg-slate-800/50 rounded-lg p-3 text-sm text-slate-300">
+                  <div className="bg-slate-800/50 rounded-lg p-3 text-sm text-slate-300 break-words overflow-hidden">
                     {triage.suggested_fix}
                   </div>
                 </div>
@@ -466,18 +466,18 @@ function IncidentDetail({ incidentId }) {
 
                   {/* Pattern Match */}
                   {triage.pre_analysis.pattern_match && (
-                    <div className="bg-purple-500/5 border border-purple-500/20 rounded-lg p-3">
-                      <div className="flex items-center gap-2 mb-1">
+                    <div className="bg-purple-500/5 border border-purple-500/20 rounded-lg p-3 break-words overflow-hidden">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
                         <span className="text-purple-400 text-xs font-medium">Pattern Matched</span>
                         <span className="text-xs text-purple-300/60 bg-purple-500/20 px-1.5 py-0.5 rounded">
                           +{((triage.pre_analysis.pattern_confidence_boost || 0) * 100).toFixed(0)}% confidence
                         </span>
                       </div>
-                      <code className="text-xs text-purple-300/80 block mb-1">
+                      <code className="text-xs text-purple-300/80 block mb-1 break-all">
                         {triage.pre_analysis.pattern_match}
                       </code>
                       {triage.pre_analysis.pattern_reason && (
-                        <p className="text-xs text-purple-200/60">{triage.pre_analysis.pattern_reason}</p>
+                        <p className="text-xs text-purple-200/60 break-words">{triage.pre_analysis.pattern_reason}</p>
                       )}
                     </div>
                   )}
@@ -494,12 +494,12 @@ function IncidentDetail({ incidentId }) {
 
                   {/* Infrastructure Health */}
                   {triage.pre_analysis.infra_health && triage.pre_analysis.infra_health.overall_status !== 'healthy' && (
-                    <div className={`rounded-lg p-3 ${
+                    <div className={`rounded-lg p-3 break-words overflow-hidden ${
                       triage.pre_analysis.infra_health.overall_status === 'critical'
                         ? 'bg-red-500/5 border border-red-500/20'
                         : 'bg-amber-500/5 border border-amber-500/20'
                     }`}>
-                      <div className="flex items-center gap-2 mb-2">
+                      <div className="flex items-center gap-2 mb-2 flex-wrap">
                         <span className={`text-xs font-medium ${
                           triage.pre_analysis.infra_health.overall_status === 'critical' ? 'text-red-400' : 'text-amber-400'
                         }`}>
@@ -512,7 +512,7 @@ function IncidentDetail({ incidentId }) {
                         )}
                       </div>
                       {triage.pre_analysis.infra_health.checks?.filter(c => c.status !== 'healthy').map((check, i) => (
-                        <p key={i} className="text-xs text-slate-400">
+                        <p key={i} className="text-xs text-slate-400 break-words">
                           • {check.component}: {check.message}
                         </p>
                       ))}
@@ -524,15 +524,15 @@ function IncidentDetail({ incidentId }) {
 
                   {/* Runbook Suggestion */}
                   {triage.pre_analysis.runbook_suggestion && (
-                    <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-3">
+                    <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-3 break-words overflow-hidden">
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-blue-400 text-xs font-medium">Suggested Runbook</span>
                       </div>
-                      <p className="text-xs text-blue-300/80">{triage.pre_analysis.runbook_suggestion.name}</p>
+                      <p className="text-xs text-blue-300/80 break-words">{triage.pre_analysis.runbook_suggestion.name}</p>
                       {triage.pre_analysis.runbook_suggestion.section && (
-                        <p className="text-xs text-blue-200/60">Section: {triage.pre_analysis.runbook_suggestion.section}</p>
+                        <p className="text-xs text-blue-200/60 break-words">Section: {triage.pre_analysis.runbook_suggestion.section}</p>
                       )}
-                      <p className="text-xs text-slate-500 mt-1">{triage.pre_analysis.runbook_suggestion.path}</p>
+                      <p className="text-xs text-slate-500 mt-1 break-all">{triage.pre_analysis.runbook_suggestion.path}</p>
                     </div>
                   )}
                 </div>
@@ -544,7 +544,7 @@ function IncidentDetail({ incidentId }) {
                   <h4 className="text-xs font-medium text-slate-400 mb-2">GCP Queries Used</h4>
                   <ul className="space-y-1.5">
                     {triage.gcp_queries.map((query, i) => (
-                      <li key={i} className="text-xs font-mono text-slate-500 bg-slate-800/50 p-2 rounded border border-slate-700/50">
+                      <li key={i} className="text-xs font-mono text-slate-500 bg-slate-800/50 p-2 rounded border border-slate-700/50 break-all overflow-x-auto">
                         {query}
                       </li>
                     ))}
@@ -675,7 +675,7 @@ function IncidentDetail({ incidentId }) {
         {triage && triage.classification !== 'fixable' && !fix && (
           <section>
             <SectionHeader>Resolution</SectionHeader>
-            <div className={`rounded-lg border p-4 ${
+            <div className={`rounded-lg border p-4 break-words overflow-hidden ${
               triage.classification === 'transient' ? 'bg-slate-800/50 border-slate-700' :
               triage.classification === 'infra_issue' ? 'bg-amber-500/5 border-amber-500/20' :
               'bg-red-500/5 border-red-500/20'
