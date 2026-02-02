@@ -266,6 +266,7 @@ function CodeBlock({ code, variant = 'neutral', maxHeight = '200px' }) {
  * Incident detail panel
  */
 function IncidentDetail({ incidentId }) {
+  const { updateIncident, refreshMetrics } = useIncidents()
   const [details, setDetails] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -303,11 +304,17 @@ function IncidentDetail({ incidentId }) {
       const res = await fetch(`/api/incidents/${incidentId}/resolve`, { method: 'POST' })
       if (!res.ok) throw new Error('Failed to resolve incident')
 
-      // Update local state to reflect resolved status
+      // Update local detail state
       setDetails(prev => ({
         ...prev,
         incident: { ...prev.incident, status: 'fixed' }
       }))
+
+      // Update the incident in the list (context state)
+      updateIncident(incidentId, { status: 'fixed' })
+
+      // Refresh metrics from server
+      await refreshMetrics()
     } catch (err) {
       console.error('Failed to resolve:', err)
     } finally {

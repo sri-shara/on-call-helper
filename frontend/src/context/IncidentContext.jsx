@@ -320,6 +320,27 @@ export function IncidentProvider({ children }) {
     }
   }, [isConnected, fetchIncidents])
 
+  // Update an incident in the local state
+  const updateIncident = useCallback((id, updates) => {
+    dispatch({
+      type: ActionTypes.UPDATE_INCIDENT,
+      payload: { id, ...updates },
+    })
+  }, [])
+
+  // Refresh metrics from the server
+  const refreshMetrics = useCallback(async () => {
+    try {
+      const response = await fetch('/api/metrics')
+      if (response.ok) {
+        const metrics = await response.json()
+        dispatch({ type: ActionTypes.SET_METRICS, payload: metrics })
+      }
+    } catch (error) {
+      console.error('Failed to refresh metrics:', error)
+    }
+  }, [])
+
   // Context value
   const value = {
     ...state,
@@ -328,6 +349,8 @@ export function IncidentProvider({ children }) {
     subscribe,
     unsubscribe,
     fetchIncidents,
+    updateIncident,
+    refreshMetrics,
     clearEvents: () => dispatch({ type: ActionTypes.CLEAR_EVENTS }),
   }
 
