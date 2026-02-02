@@ -301,6 +301,10 @@ export function IncidentProvider({ children }) {
               severity: incident.severity,
               status: incident.status,
               createdAt: incident.created_at,
+              // Include triage classification for consistent badge display
+              triage: incident.triage_classification
+                ? { classification: incident.triage_classification }
+                : undefined,
             },
           })
         })

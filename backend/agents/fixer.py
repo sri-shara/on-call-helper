@@ -5,6 +5,7 @@ Uses Claude AI to generate minimal code fixes based on triage analysis.
 Reads actual source code from GitHub and produces targeted fixes.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -407,6 +408,8 @@ Please generate an improved fix that addresses these issues.
         """
         Fetch source code from local Nucleus repository.
 
+        Uses run_in_executor to avoid blocking the event loop with file I/O.
+
         Args:
             file_path: Path to the file relative to repo root
 
@@ -428,7 +431,12 @@ Please generate an improved fix that addresses these issues.
             raise FixerError(f"Path is not a file: {local_path}")
 
         try:
-            content = local_path.read_text(encoding="utf-8")
+            # Use run_in_executor for non-blocking file I/O
+            loop = asyncio.get_event_loop()
+            content = await loop.run_in_executor(
+                None,  # Uses default executor (ThreadPoolExecutor)
+                lambda: local_path.read_text(encoding="utf-8")
+            )
             logger.debug(f"Successfully read {file_path} ({len(content)} chars)")
             return content
         except Exception as e:

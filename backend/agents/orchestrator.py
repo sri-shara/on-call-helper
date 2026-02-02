@@ -300,6 +300,9 @@ class PipelineOrchestrator:
             data=triage_data,
         )
 
+        # Persist triage result to storage
+        storage.save_triage_result(result)
+
         return result
 
     async def _run_fix_generation(
@@ -338,6 +341,9 @@ class PipelineOrchestrator:
                 "iteration": result.iteration,
             },
         )
+
+        # Persist fix result to storage
+        storage.save_fix_result(result)
 
         return result
 
@@ -420,6 +426,9 @@ class PipelineOrchestrator:
                     "tests_passed": result.tests_passed,
                 },
             )
+
+            # Persist test result to storage
+            storage.save_test_result(result)
 
             return result
 
@@ -755,6 +764,9 @@ class PipelineOrchestrator:
                     fix_result,
                     test_result,
                 )
+                # Save PR URL to incident for future reference
+                incident.pr_url = pr_url
+                storage.save_incident(incident)
             except GitHubError as e:
                 await self._handle_escalation(
                     incident,
@@ -787,6 +799,9 @@ class PipelineOrchestrator:
                         pr_url,
                         pr_merged_at,
                     )
+
+                    # Persist verification result to storage
+                    storage.save_verification_result(verification_result)
 
                     if verification_result.status == VerificationStatus.FAILED:
                         await self._handle_escalation(
@@ -870,7 +885,16 @@ class PipelineOrchestrator:
         classification: TriageClassification,
     ) -> EscalationReason:
         """Get escalation reason for non-fixable classification."""
-        return EscalationReason.NOT_FIXABLE
+        # Map classifications to escalation reasons
+        # All non-fixable classifications use NOT_FIXABLE, but we log the specific type
+        mapping = {
+            TriageClassification.INFRA_ISSUE: EscalationReason.NOT_FIXABLE,
+            TriageClassification.TRANSIENT: EscalationReason.NOT_FIXABLE,
+            TriageClassification.NEEDS_HUMAN: EscalationReason.NOT_FIXABLE,
+        }
+        reason = mapping.get(classification, EscalationReason.NOT_FIXABLE)
+        logger.info(f"Escalating due to classification: {classification.value} -> {reason.value}")
+        return reason
 
     def _get_escalation_message_for_classification(
         self,

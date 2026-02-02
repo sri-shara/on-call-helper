@@ -72,6 +72,7 @@ class Incident(BaseModel):
     status: IncidentStatus = Field(IncidentStatus.ACTIVE, description="Current status")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     resolved_at: Optional[datetime] = Field(None, description="When incident was resolved")
+    pr_url: Optional[str] = Field(None, description="Pull request URL if created")
 
     # Metadata from GCP
     gcp_insert_id: Optional[str] = Field(None, description="GCP log insertId for dedup")
