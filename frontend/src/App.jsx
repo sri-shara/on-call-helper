@@ -368,24 +368,16 @@ function IncidentDetail({ incidentId }) {
             <p className="text-xs text-slate-500 font-mono mt-0.5">{incident.id}</p>
           </div>
           <div className="flex items-center gap-3">
-            {/* Show Resolve button for incidents needing human action (not already fixed) */}
-            {(() => {
-              const cls = triage?.classification
-              const status = incident.status
-              const needsReview = cls === 'needs_human' || cls === 'infra_issue' || status === 'escalated'
-              const notFixed = status !== 'fixed' && status !== 'pr_created'
-              // Debug: log values
-              console.log('Resolve button check:', { cls, status, needsReview, notFixed, show: needsReview && notFixed })
-              return needsReview && notFixed
-            })() && (
+            {/* Show Resolve button - always visible for non-fixed, non-fixable incidents */}
+            {incident.status !== 'fixed' && incident.status !== 'pr_created' && !incident.pr_url && triage?.classification !== 'fixable' && (
               <button
                 onClick={handleResolve}
                 disabled={resolving}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg text-sm font-medium text-emerald-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
               >
                 {resolving ? (
                   <>
-                    <div className="w-3.5 h-3.5 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin" />
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                     Resolving...
                   </>
                 ) : (
@@ -393,7 +385,7 @@ function IncidentDetail({ incidentId }) {
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                     </svg>
-                    Resolve
+                    Mark Resolved
                   </>
                 )}
               </button>
