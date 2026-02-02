@@ -368,7 +368,9 @@ Please generate an improved fix that addresses these issues.
             user_prompt = self._format_triage(triage, source_code)
 
         try:
-            message = self.client.messages.create(
+            # Run in thread pool to avoid blocking the event loop
+            message = await asyncio.to_thread(
+                self.client.messages.create,
                 model=self.model,
                 max_tokens=4096,
                 system=FIXER_SYSTEM_PROMPT,

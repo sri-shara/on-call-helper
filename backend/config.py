@@ -73,8 +73,8 @@ class Settings(BaseSettings):
                     "Useful when Cloud Logging is in one project and Firestore in another."
     )
     firestore_database_id: str = Field(
-        "oncall-helper-db",
-        description="Firestore database ID. Use '(default)' for default database."
+        "",
+        description="Firestore database ID. Leave empty for '(default)' database."
     )
 
     # ═══════════════ Dashboard ═══════════════
