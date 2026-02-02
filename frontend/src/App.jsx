@@ -368,10 +368,14 @@ function IncidentDetail({ incidentId }) {
             <p className="text-xs text-slate-500 font-mono mt-0.5">{incident.id}</p>
           </div>
           <div className="flex items-center gap-3">
-            {/* Show Resolve button for escalated incidents that need human action */}
-            {(incident.status === 'escalated' ||
-              (triage?.classification && ['needs_human', 'infra_issue'].includes(triage.classification))) &&
-              incident.status !== 'fixed' && (
+            {/* Show Resolve button for incidents needing human action (not already fixed) */}
+            {(() => {
+              const needsReview = triage?.classification === 'needs_human' ||
+                                  triage?.classification === 'infra_issue' ||
+                                  incident.status === 'escalated'
+              const notFixed = incident.status !== 'fixed' && incident.status !== 'pr_created'
+              return needsReview && notFixed
+            })() && (
               <button
                 onClick={handleResolve}
                 disabled={resolving}
