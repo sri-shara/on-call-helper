@@ -361,7 +361,10 @@ function IncidentDetail({ incidentId }) {
             <p className="text-xs text-slate-500 font-mono mt-0.5">{incident.id}</p>
           </div>
           <div className="flex items-center gap-3">
-            {incident.status === 'escalated' && (
+            {/* Show Resolve button for escalated incidents that need human action */}
+            {(incident.status === 'escalated' ||
+              (triage?.classification && ['needs_human', 'infra_issue'].includes(triage.classification))) &&
+              incident.status !== 'fixed' && (
               <button
                 onClick={handleResolve}
                 disabled={resolving}
