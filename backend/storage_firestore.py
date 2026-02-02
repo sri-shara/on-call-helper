@@ -60,7 +60,13 @@ class FirestoreStorage:
         """
         from backend.config import settings
 
-        self.project_id = project_id or settings.gcp_project_id
+        # Use firestore_project_id if set, otherwise fall back to gcp_project_id
+        # This allows Firestore to be in a different project than Cloud Logging
+        self.project_id = (
+            project_id
+            or settings.firestore_project_id
+            or settings.gcp_project_id
+        )
         self._db: Optional[firestore.Client] = None
 
         # Local cache for deduplication (also backed by Firestore)

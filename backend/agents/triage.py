@@ -394,8 +394,34 @@ class TriageAgent:
         """
         data = self._extract_json(response_text)
 
-        # Required fields
-        classification = self._parse_classification(data.get("classification", "NEEDS_HUMAN"))
+        # Try multiple key names for classification (Claude might use different names)
+        classification_value = (
+            data.get("classification") or
+            data.get("type") or
+            data.get("category") or
+            data.get("decision") or
+            data.get("result_type")
+        )
+
+        if not classification_value:
+            logger.warning(f"No classification found in response keys: {list(data.keys())}")
+            # If we have enough info for a fix, classify as FIXABLE instead of NEEDS_HUMAN
+            if data.get("file_path") and data.get("root_cause") and data.get("suggested_fix"):
+                logger.info("Upgrading to FIXABLE: sufficient context available (file_path, root_cause, suggested_fix)")
+                classification = TriageClassification.FIXABLE
+            else:
+                classification = TriageClassification.NEEDS_HUMAN
+        else:
+            try:
+                classification = self._parse_classification(classification_value)
+            except TriageError as e:
+                logger.warning(f"Unknown classification value '{classification_value}': {e}")
+                # Check if we have enough info for a fix
+                if data.get("file_path") and data.get("root_cause") and data.get("suggested_fix"):
+                    classification = TriageClassification.FIXABLE
+                else:
+                    classification = TriageClassification.NEEDS_HUMAN
+
         root_cause = data.get("root_cause", "Unable to determine root cause")
         confidence = float(data.get("confidence", 0.5))
 

@@ -4,6 +4,35 @@ A standalone AI-powered incident response agent that monitors the Nucleus MDR pl
 
 ---
 
+## 🎯 Current Implementation Status
+
+**Last Updated**: February 2026
+
+### ✅ Fully Implemented
+- **Error Ingestion**: GCP Cloud Logging integration (webhook + polling modes)
+- **Filtering**: Transient error filter (20+ patterns) and tenant filter (explicit lists)
+- **Triage Agent**: Claude AI with embedded SRE knowledge + GCP context fetching
+- **Fixer Agent**: Code fix generation with fuzzy matching and local file reading
+- **GitHub Integration**: PR creation via `git` + `gh` CLI
+- **WebSocket Manager**: Real-time event broadcasting to dashboard
+- **Storage**: In-memory storage (with optional Firestore backend)
+- **Frontend**: React dashboard with real-time updates
+- **Orchestrator**: Full pipeline coordination with error handling
+
+### ⚠️ Optional Features (Can Be Skipped)
+- **CodeRabbit Review**: Code review integration (skips if not installed)
+- **Sandbox Testing**: Kind cluster testing (skips if Kind unavailable)
+- **Production Verification**: Post-deploy monitoring (can be disabled)
+- **PagerDuty**: Team notifications (optional)
+
+### 📊 Key Metrics
+- **Storage Backend**: In-memory (default) or Firestore (optional)
+- **GCP Integration**: Webhook (Pub/Sub push) or Polling (API queries)
+- **Source Code**: Reads from local Nucleus repository filesystem
+- **PR Creation**: Uses `git` commands + GitHub CLI (`gh`)
+
+---
+
 ## Repository References
 
 > **IMPORTANT**: When implementing this system, always reference these repositories for context:
@@ -192,54 +221,60 @@ A standalone AI-powered incident response agent that monitors the Nucleus MDR pl
 
 ### Directory Structure
 
+**Current Implementation**:
+
 ```
 on-call-helper/
 ├── backend/
-│   ├── main.py                     # FastAPI app, routes, WebSocket endpoint
-│   ├── config.py                   # Environment configuration
-│   ├── websocket_manager.py        # Connection management, event broadcasting
-│   ├── storage.py                  # In-memory storage, metrics tracking
+│   ├── main.py                     # ✅ FastAPI app, routes, WebSocket endpoint
+│   ├── config.py                   # ✅ Environment configuration (Pydantic Settings)
+│   ├── websocket_manager.py        # ✅ Connection management, event broadcasting
+│   ├── storage.py                  # ✅ In-memory storage (with Firestore option)
+│   ├── storage_firestore.py        # ✅ Optional Firestore backend
 │   ├── models/
-│   │   └── incident.py             # Pydantic models for all entities
+│   │   └── incident.py             # ✅ Pydantic models for all entities
 │   ├── agents/
-│   │   ├── orchestrator.py         # Pipeline coordinator
-│   │   ├── triage.py               # Claude + embedded SRE knowledge
-│   │   └── fixer.py                # Claude fix generation
+│   │   ├── orchestrator.py         # ✅ Pipeline coordinator (full implementation)
+│   │   ├── triage.py               # ✅ Claude + embedded SRE knowledge + GCP context
+│   │   └── fixer.py                # ✅ Claude fix generation (local file reading)
 │   ├── services/
-│   │   ├── gcp_logging.py          # GCP log ingestion (webhook + polling)
-│   │   ├── coderabbit.py           # Code review via CLI
-│   │   ├── sandbox.py              # Kind cluster management
-│   │   ├── github.py               # PR creation
-│   │   ├── pagerduty.py            # Team notifications
-│   │   └── production_monitor.py   # Post-deploy verification
+│   │   ├── gcp_logging.py          # ✅ GCP log ingestion (webhook + polling)
+│   │   ├── coderabbit.py           # ✅ Code review via CLI (optional)
+│   │   ├── sandbox.py              # ⚠️ Kind cluster management (can be skipped)
+│   │   ├── github.py               # ✅ PR creation (git + gh CLI)
+│   │   ├── pagerduty.py            # ✅ Team notifications (optional)
+│   │   └── production_monitor.py   # ✅ Post-deploy verification (can be skipped)
 │   ├── filters/
-│   │   ├── transient.py            # Self-healing error filter
-│   │   └── tenant.py               # Demo tenant filter
-│   └── knowledge/                  # Embedded SRE knowledge (from oncall repo)
+│   │   ├── transient.py            # ✅ Self-healing error filter (20+ patterns)
+│   │   └── tenant.py               # ✅ Demo tenant filter (explicit tenant list)
+│   └── knowledge/
 │       ├── __init__.py
-│       ├── loader.py               # Load knowledge from oncall repo
-│       ├── runbooks/               # Symlink or copy from /Users/sri/oncall/runbooks
-│       └── sre_triage/             # Symlink or copy from /Users/sri/oncall/.claude/commands/sre-triage
+│       └── loader.py               # ✅ Load knowledge from oncall repo (cached)
 ├── frontend/
 │   └── src/
-│       ├── hooks/useWebSocket.js   # WebSocket with auto-reconnect
-│       ├── context/IncidentContext.jsx  # Global state management
-│       └── components/             # Dashboard UI components
+│       ├── hooks/useWebSocket.js   # ✅ WebSocket with auto-reconnect
+│       ├── context/IncidentContext.jsx  # ✅ Global state management
+│       └── components/             # ✅ Dashboard UI components
 ├── sandbox/
 │   ├── kind-config.yaml            # Kind cluster configuration
 │   ├── deploy.sh                   # Deploy Nucleus to Kind
 │   ├── run-tests.sh                # Execute test suite
 │   └── cleanup.sh                  # Teardown cluster
 ├── tests/
-│   ├── test_triage.py
-│   ├── test_fixer.py
-│   └── test_sandbox.py
-├── requirements.txt
-├── package.json
-├── Dockerfile
-├── docker-compose.yaml
+│   ├── test_triage.py              # ✅ Tests
+│   ├── test_fixer.py               # ✅ Tests
+│   ├── test_sandbox.py             # ✅ Tests
+│   └── ...                         # Additional test files
+├── requirements.txt               # ✅ Python dependencies
+├── package.json                   # ✅ Frontend dependencies
+├── Dockerfile                      # ✅ Backend container
+├── docker-compose.yaml             # ✅ Docker Compose setup
 └── ARCHITECTURE.md                 # This file
 ```
+
+**Legend**:
+- ✅ Fully implemented
+- ⚠️ Implemented but can be skipped (optional features)
 
 ---
 
@@ -249,7 +284,14 @@ on-call-helper/
 
 **Purpose**: Receive and filter production errors from Nucleus infrastructure
 
-**GCP Setup**:
+**Implementation Status**: ✅ **IMPLEMENTED**
+
+**Two Modes of Operation**:
+
+1. **Pub/Sub Push Webhook** (Production recommended)
+2. **GCP Polling Mode** (Development/testing, read-only access)
+
+**GCP Setup (Pub/Sub Push)**:
 ```bash
 # 1. Create Pub/Sub topic for error logs
 gcloud pubsub topics create oncall-helper-errors
@@ -266,22 +308,34 @@ gcloud logging sinks create oncall-helper-sink \
   --log-filter='severity>=ERROR AND resource.type="cloud_run_revision"'
 ```
 
-**Webhook Endpoint**:
-```python
-@app.post("/webhook/gcp-logs")
-async def receive_gcp_log(request: Request):
-    log_entry = await parse_pubsub_message(request)
+**GCP Polling Mode** (Alternative):
+```bash
+# Authenticate with GCP
+gcloud auth application-default login
 
-    # Apply filters
-    if not should_process_error(log_entry):
-        return {"status": "filtered"}
-
-    # Create incident and start pipeline
-    incident = create_incident_from_log(log_entry)
-    await orchestrator.process_incident(incident)
-
-    return {"status": "processing", "incident_id": incident.id}
+# Start polling via API
+curl -X POST "http://localhost:8001/gcp/polling/start?interval_seconds=30"
 ```
+
+**Webhook Endpoint** (`/webhook/gcp-logs`):
+- ✅ Parses Pub/Sub push messages
+- ✅ Extracts error message, stack trace, service name, tenant info
+- ✅ Deduplication via `insertId` tracking
+- ✅ Applies transient and tenant filters
+- ✅ Creates incidents and triggers pipeline
+
+**Polling Endpoint** (`/gcp/polling/start`):
+- ✅ Queries Cloud Logging API directly
+- ✅ Configurable interval (default 30s)
+- ✅ Tracks processed logs to avoid duplicates
+- ✅ Can be started/stopped via API
+
+**Key Features**:
+- Automatic deduplication using GCP `insertId`
+- Service name extraction from resource labels
+- Tenant ID/name extraction from log payload
+- File path extraction from stack traces
+- Severity mapping (GCP → Incident severity)
 
 ---
 
@@ -392,60 +446,32 @@ def should_process_tenant(tenant_name: str) -> tuple[bool, str]:
 
 **Purpose**: Analyze errors using Claude with embedded SRE runbook knowledge
 
-**Knowledge Loading**:
-```python
-# knowledge/loader.py
+**Implementation Status**: ✅ **IMPLEMENTED** (Enhanced with GCP context fetching)
 
-import os
-from pathlib import Path
+**Knowledge Loading** (`backend/knowledge/loader.py`):
+- ✅ Loads SRE knowledge from `/Users/sri/oncall` repository
+- ✅ Cached with `@lru_cache` for performance
+- ✅ Handles missing files gracefully
+- ✅ Loads triage framework, runbooks, error patterns, tenant reference
 
-ONCALL_REPO_PATH = Path("/Users/sri/oncall")
+**Key Features**:
+- **GCP Context Fetching**: Actively queries GCP logs for additional context:
+  - Related errors from same service (past hour)
+  - Error frequency and patterns
+  - Similar errors across other services
+  - Recent service activity logs
+- **Enhanced Classification**: Uses GCP context to make better decisions:
+  - Widespread errors → INFRA_ISSUE
+  - High frequency → TRANSIENT or INFRA
+  - Isolated errors → FIXABLE
+- **System Prompt**: Includes all SRE knowledge in Claude's system prompt
+- **JSON Output**: Structured classification with confidence scores
 
-def load_sre_knowledge() -> dict:
-    """Load all SRE knowledge from the oncall repository."""
-
-    knowledge = {
-        # Main triage framework
-        "triage_framework": _load_file(
-            ONCALL_REPO_PATH / ".claude/commands/sre-triage.md"
-        ),
-
-        # Triage sub-components
-        "infrastructure_checks": _load_file(
-            ONCALL_REPO_PATH / ".claude/commands/sre-triage/infrastructure-checks.md"
-        ),
-        "bigquery_queries": _load_file(
-            ONCALL_REPO_PATH / ".claude/commands/sre-triage/bigquery-queries.md"
-        ),
-        "tenant_reference": _load_file(
-            ONCALL_REPO_PATH / ".claude/commands/sre-triage/tenant-reference.md"
-        ),
-        "error_patterns": _load_file(
-            ONCALL_REPO_PATH / ".claude/commands/sre-triage/error-patterns.md"
-        ),
-        "output_format": _load_file(
-            ONCALL_REPO_PATH / ".claude/commands/sre-triage/output-format.md"
-        ),
-
-        # Runbooks
-        "runbooks": {
-            "alloydb": _load_file(ONCALL_REPO_PATH / "runbooks/alloydb.md"),
-            "pubsub": _load_file(ONCALL_REPO_PATH / "runbooks/pubsub-backlogs.md"),
-            "cloud_run": _load_file(ONCALL_REPO_PATH / "runbooks/cloud-run.md"),
-            "integrations": _load_file(ONCALL_REPO_PATH / "runbooks/integrations.md"),
-            "secops": _load_file(ONCALL_REPO_PATH / "runbooks/secops-integration.md"),
-        },
-    }
-
-    return knowledge
-
-def _load_file(path: Path) -> str:
-    """Load file content, return empty string if not found."""
-    try:
-        return path.read_text()
-    except FileNotFoundError:
-        return f"[File not found: {path}]"
-```
+**Triage Classifications**:
+- `FIXABLE`: Code bug that can be auto-fixed
+- `INFRA_ISSUE`: Infrastructure problem (AlloyDB, Pub/Sub, networking)
+- `TRANSIENT`: Self-healing error that will resolve
+- `NEEDS_HUMAN`: Too complex for automated handling
 
 **Triage Agent System Prompt**:
 ```python
@@ -565,94 +591,35 @@ class TriageAgent:
 
 **Purpose**: Generate minimal code fixes based on triage analysis
 
+**Implementation Status**: ✅ **IMPLEMENTED**
+
 **Reference for Nucleus code patterns**: `/Users/sri/nucleus/backend/`
 
+**Key Features**:
+- ✅ Reads source code from **local filesystem** (not GitHub API)
+- ✅ Fuzzy code matching handles whitespace differences
+- ✅ Validates fixes before returning (balanced braces, code found in source)
+- ✅ Supports retry loop with CodeRabbit feedback
+- ✅ Normalizes whitespace for accurate code replacement
+
+**Source Code Reading**:
 ```python
-# agents/fixer.py
-
-FIXER_SYSTEM_PROMPT = """
-You are a code fix agent for Nucleus, a Go-based MDR platform.
-
-## Nucleus Codebase Context
-- Language: Go 1.24+
-- Architecture: Microservices in backend/services/ and backend/processors/
-- Database: PostgreSQL with sqlc for type-safe queries
-- Testing: Go standard testing + testify
-- Style: Follow existing patterns in the codebase
-
-## Your Task
-Generate a MINIMAL fix for the identified bug.
-
-Rules:
-1. Make the smallest possible change to fix the issue
-2. Do NOT refactor unrelated code
-3. Do NOT add features or improvements beyond the fix
-4. Match existing code style exactly
-5. Include error handling if the bug was caused by missing error handling
-6. The fix must compile and pass `go build` and `go vet`
-
-## Output Format
-Provide your fix as JSON:
-{
-    "file_path": "backend/services/...",
-    "original_code": "the buggy code section",
-    "fixed_code": "the corrected code section",
-    "explanation": "why this fix works",
-    "diff_summary": "brief description of changes"
-}
-"""
-
-class FixerAgent:
-    def __init__(self, github_service: GitHubService):
-        self.client = Anthropic()
-        self.model = "claude-sonnet-4-20250514"
-        self.github = github_service
-
-    async def generate_fix(
-        self,
-        triage: TriageResult,
-        coderabbit_feedback: str | None = None
-    ) -> FixResult:
-        """Generate code fix based on triage analysis."""
-
-        # Fetch actual source code from GitHub
-        source_code = await self.github.get_file_content(
-            repo="your-org/nucleus",
-            path=triage.file_path,
-            ref="main"
-        )
-
-        user_prompt = f"""
-        ## Bug Analysis
-        - **Root Cause**: {triage.root_cause}
-        - **File**: {triage.file_path}
-        - **Function**: {triage.function_name}
-        - **Confidence**: {triage.confidence}
-
-        ## Current Source Code
-        ```go
-        {source_code}
-        ```
-
-        ## Problematic Code Snippet
-        ```go
-        {triage.code_snippet}
-        ```
-
-        {"## Previous CodeRabbit Feedback (address these issues):" + coderabbit_feedback if coderabbit_feedback else ""}
-
-        Generate a minimal fix for this bug.
-        """
-
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=4096,
-            system=FIXER_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}]
-        )
-
-        return self._parse_response(response, triage.incident_id)
+# Reads from local Nucleus repository
+local_path = settings.nucleus_repo_path / file_path
+content = local_path.read_text(encoding="utf-8")
 ```
+
+**Code Matching**:
+- First tries exact match
+- Falls back to normalized whitespace matching
+- Uses `difflib` for fuzzy matching (85%+ similarity threshold)
+- Returns actual source code for accurate replacement
+
+**Fix Validation**:
+- Ensures `original_code` exists in source file
+- Validates `fixed_code` is different from original
+- Checks balanced braces/parentheses
+- Returns actual matching code from source (handles formatting differences)
 
 ---
 
@@ -887,65 +854,33 @@ class CodeRabbitService:
 
 **Purpose**: Create PRs for validated fixes
 
-**Reference for PR format**: Standard Nucleus PR conventions
+**Implementation Status**: ✅ **IMPLEMENTED** (Uses `git` + `gh` CLI)
 
-```python
-# services/github.py
+**Approach**: Uses local `git` commands and GitHub CLI (`gh`) instead of GitHub API
 
-from github import Github
+**Key Features**:
+- ✅ Works with local Nucleus repository
+- ✅ Creates branch, commits fix, pushes to remote
+- ✅ Uses `gh pr create` for PR creation
+- ✅ Generates comprehensive PR body with:
+  - Incident details and root cause
+  - Code diff
+  - Test results
+  - Verification plan
+- ✅ Creates draft PRs (requires human approval)
 
-class GitHubService:
-    def __init__(self, token: str, repo: str):
-        self.client = Github(token)
-        self.repo = self.client.get_repo(repo)
+**Workflow**:
+1. Checkout new branch: `oncall-helper/fix-{incident_id}`
+2. Apply fix to local file (string replacement)
+3. Commit with descriptive message
+4. Push branch to remote
+5. Create PR via `gh pr create --draft`
+6. Add labels: `oncall-helper`, `auto-fix`, `tests-passed`
 
-    async def create_fix_pr(
-        self,
-        incident: Incident,
-        triage: TriageResult,
-        fix: FixResult,
-        test_results: TestResult
-    ) -> str:
-        """Create a PR for the validated fix."""
-
-        # Create branch
-        branch_name = f"oncall-helper/fix-{incident.id}"
-        base_branch = self.repo.get_branch("main")
-        self.repo.create_git_ref(
-            ref=f"refs/heads/{branch_name}",
-            sha=base_branch.commit.sha
-        )
-
-        # Get current file content
-        file = self.repo.get_contents(fix.file_path, ref="main")
-
-        # Update file with fix
-        current_content = file.decoded_content.decode()
-        new_content = current_content.replace(fix.original_code, fix.fixed_code)
-
-        self.repo.update_file(
-            path=fix.file_path,
-            message=f"fix: {incident.title}\n\nAuto-generated by On Call Helper",
-            content=new_content,
-            sha=file.sha,
-            branch=branch_name
-        )
-
-        # Create PR
-        pr_body = self._generate_pr_body(incident, triage, fix, test_results)
-
-        pr = self.repo.create_pull(
-            title=f"[On Call Helper] Fix: {incident.title[:50]}",
-            body=pr_body,
-            head=branch_name,
-            base="main",
-            draft=True  # Draft PR requires human approval
-        )
-
-        # Add labels
-        pr.add_to_labels("oncall-helper", "auto-fix", "tests-passed")
-
-        return pr.html_url
+**Requirements**:
+- GitHub CLI (`gh`) installed and authenticated
+- Local Nucleus repository with remote configured
+- Write access to repository
 
     def _generate_pr_body(
         self,
@@ -1177,12 +1112,12 @@ class PagerDutyService:
 
 ## Data Models
 
+**Implementation Status**: ✅ **IMPLEMENTED** (`backend/models/incident.py`)
+
+All models use Pydantic for validation and serialization:
+
 ```python
 # models/incident.py
-
-from pydantic import BaseModel
-from datetime import datetime
-from enum import Enum
 
 class Severity(str, Enum):
     LOW = "low"
@@ -1194,6 +1129,7 @@ class IncidentStatus(str, Enum):
     ACTIVE = "active"
     TRIAGING = "triaging"
     FIXING = "fixing"
+    REVIEWING = "reviewing"  # Added
     TESTING = "testing"
     PR_CREATED = "pr_created"
     VERIFYING = "verifying"
@@ -1211,28 +1147,39 @@ class Incident(BaseModel):
     id: str  # Format: "OCH-{8chars}"
     title: str
     error_message: str
-    stack_trace: str | None
-    file_path: str | None
+    stack_trace: Optional[str]
+    file_path: Optional[str]
     service_name: str
     severity: Severity
-    tenant_name: str | None
+    tenant_name: Optional[str]
     environment: str  # production, staging
     status: IncidentStatus
     created_at: datetime
-    resolved_at: datetime | None = None
+    resolved_at: Optional[datetime] = None
+    # GCP metadata
+    gcp_insert_id: Optional[str]  # For deduplication
+    gcp_resource_type: Optional[str]
+    gcp_log_name: Optional[str]
 
 class TriageResult(BaseModel):
     incident_id: str
     classification: TriageClassification
     root_cause: str
-    service_name: str
-    file_path: str | None
-    function_name: str | None
-    code_snippet: str | None
-    suggested_fix: str | None
     confidence: float  # 0.0-1.0
-    runbook_reference: str | None  # For INFRA_ISSUE
-    manual_steps: list[str] | None  # For INFRA_ISSUE
+    # FIXABLE fields
+    service_name: Optional[str]
+    file_path: Optional[str]
+    function_name: Optional[str]
+    code_snippet: Optional[str]
+    line_numbers: Optional[Tuple[int, int]]  # Added
+    suggested_fix: Optional[str]
+    # INFRA_ISSUE fields
+    runbook_reference: Optional[str]
+    manual_steps: Optional[List[str]]
+    # Metadata
+    related_context: List[str]  # Added
+    gcp_context: Optional[Dict[str, Any]]  # Added - GCP log context
+    created_at: datetime
 
 class FixResult(BaseModel):
     incident_id: str
@@ -1241,28 +1188,58 @@ class FixResult(BaseModel):
     fixed_code: str
     explanation: str
     diff_summary: str
-    iteration: int  # Which CodeRabbit iteration
+    iteration: int  # 1-3 (CodeRabbit iteration)
+    created_at: datetime
+
+class ReviewIssue(BaseModel):  # Added structured issue model
+    severity: str
+    message: str
+    line: Optional[int]
+    suggestion: Optional[str]
 
 class ReviewResult(BaseModel):
     passed: bool
-    issues: list[dict]
-    suggestions: list[str]
+    issues: List[ReviewIssue]  # Structured
+    suggestions: List[str]
     summary: str
 
 class TestResult(BaseModel):
     incident_id: str
     passed: bool
-    unit_tests: dict | None
-    smoke_tests: dict | None
+    unit_tests_passed: Optional[bool]
+    unit_tests_output: Optional[str]
+    smoke_tests_passed: Optional[bool]
+    smoke_tests_output: Optional[str]
+    tests_run: int
+    tests_passed: int
+    tests_failed: int
     duration_ms: int
+    coverage_percent: Optional[float]
+    created_at: datetime
+
+class VerificationStatus(str, Enum):  # Added enum
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    FAILED = "failed"
 
 class VerificationResult(BaseModel):
     incident_id: str
-    status: str  # SUCCESS, PARTIAL, FAILED
+    status: VerificationStatus  # Enum instead of string
     message: str
     errors_before: int
     errors_after: int
     monitoring_duration_hours: int
+    pr_url: Optional[str]  # Added
+    created_at: datetime
+
+class Metrics(BaseModel):  # Added
+    total_incidents: int
+    auto_fixed: int
+    escalated: int
+    filtered: int
+    processing: int
+    mttr_seconds: Optional[float]
+    success_rate: Optional[float]
 ```
 
 ---
@@ -1448,76 +1425,124 @@ class PipelineOrchestrator:
 
 ## Environment Variables
 
+**Implementation Status**: ✅ **IMPLEMENTED** (`backend/config.py`)
+
+All settings use Pydantic Settings with environment variable loading:
+
 ```bash
 # .env
 
 # ═══════════════ AI ═══════════════
 ANTHROPIC_API_KEY=sk-ant-...
+TRIAGE_MODEL=claude-sonnet-4-20250514
+FIXER_MODEL=claude-sonnet-4-20250514
 
 # ═══════════════ GCP ═══════════════
-GOOGLE_APPLICATION_CREDENTIALS=./credentials.json
 GCP_PROJECT_ID=your-nucleus-project
+GCP_CREDENTIALS_PATH=./credentials.json  # Optional (uses ADC if not set)
 GCP_LOG_FILTER=severity>=ERROR
 
 # ═══════════════ GitHub ═══════════════
-GITHUB_TOKEN=ghp_...
+GITHUB_TOKEN=ghp_...  # For gh CLI authentication
 GITHUB_REPO=your-org/nucleus
 GITHUB_BASE_BRANCH=main
 
 # ═══════════════ PagerDuty ═══════════════
-PAGERDUTY_ROUTING_KEY=...
+PAGERDUTY_ROUTING_KEY=...  # Optional
 
 # ═══════════════ CodeRabbit ═══════════════
-CODERABBIT_MAX_RETRIES=3
+CODERABBIT_MAX_RETRIES=3  # Optional (skips if not installed)
 
 # ═══════════════ Sandbox ═══════════════
 SANDBOX_TIMEOUT_MINUTES=15
 NUCLEUS_REPO_PATH=/Users/sri/nucleus
 ONCALL_REPO_PATH=/Users/sri/oncall
 
+# ═══════════════ Storage ═══════════════
+STORAGE_BACKEND=memory  # or "firestore"
+
+# ═══════════════ Production Monitoring ═══════════════
+VERIFICATION_DURATION_HOURS=2
+VERIFICATION_CHECK_INTERVAL_MINUTES=5
+
 # ═══════════════ App ═══════════════
+APP_NAME=On Call Helper
+APP_VERSION=0.1.0
+DEBUG=false
 LOG_LEVEL=INFO
+HOST=0.0.0.0
+PORT=8000
 DASHBOARD_URL=http://localhost:3000
 ```
 
+**Configuration Features**:
+- ✅ Pydantic Settings with validation
+- ✅ Environment variable loading from `.env` file
+- ✅ Sensible defaults for development
+- ✅ `validate_required_for_production()` method
+- ✅ Case-insensitive environment variable names
+
 ---
 
-## Implementation Order
+## Implementation Status
 
-### Phase 1: Foundation
-1. FastAPI scaffolding with health endpoints
-2. Pydantic models for all entities
-3. WebSocket manager for real-time updates
-4. Configuration and environment loading
+### ✅ Phase 1: Foundation (COMPLETE)
+1. ✅ FastAPI scaffolding with health endpoints
+2. ✅ Pydantic models for all entities
+3. ✅ WebSocket manager for real-time updates
+4. ✅ Configuration and environment loading
 
-### Phase 2: Filters
-5. Transient error filter (from oncall error patterns)
-6. Tenant filter (demo vs production)
-7. Error ingestion webhook endpoint
+### ✅ Phase 2: Filters (COMPLETE)
+5. ✅ Transient error filter (20+ patterns from oncall repo)
+6. ✅ Tenant filter (explicit demo/production tenant lists)
+7. ✅ Error ingestion webhook endpoint
+8. ✅ GCP polling mode (alternative to webhook)
 
-### Phase 3: Triage
-8. SRE knowledge loader (from oncall repo)
-9. Triage agent with embedded knowledge
-10. GCP Cloud Logging integration
+### ✅ Phase 3: Triage (COMPLETE)
+9. ✅ SRE knowledge loader (from oncall repo, cached)
+10. ✅ Triage agent with embedded knowledge
+11. ✅ GCP context fetching (enhanced triage)
+12. ✅ GCP Cloud Logging integration (webhook + polling)
 
-### Phase 4: Fix Generation
-11. GitHub service (file reading)
-12. Fixer agent
-13. CodeRabbit service with retry loop
+### ✅ Phase 4: Fix Generation (COMPLETE)
+13. ✅ Local file reading (from Nucleus repo)
+14. ✅ Fixer agent with fuzzy code matching
+15. ✅ CodeRabbit service with retry loop (optional)
 
-### Phase 5: Validation
-14. Sandbox service (Kind cluster management)
-15. Test runner integration
+### ⚠️ Phase 5: Validation (PARTIAL)
+16. ⚠️ Sandbox service (Kind cluster management) - Implemented but can be skipped
+17. ⚠️ Test runner integration - Implemented but optional
 
-### Phase 6: PR & Notification
-16. GitHub PR creation
-17. PagerDuty integration
-18. Production verification service
+### ✅ Phase 6: PR & Notification (COMPLETE)
+18. ✅ GitHub PR creation (git + gh CLI)
+19. ✅ PagerDuty integration (optional)
+20. ✅ Production verification service (can be skipped)
 
-### Phase 7: Frontend
-19. WebSocket hook with auto-reconnect
-20. Incident context and state management
-21. Dashboard components
+### ✅ Phase 7: Frontend (COMPLETE)
+21. ✅ WebSocket hook with auto-reconnect
+22. ✅ Incident context and state management
+23. ✅ Dashboard components (IncidentTable, AgentThinking, CodeDiff, etc.)
+
+## Current Capabilities
+
+**Fully Working**:
+- ✅ GCP error ingestion (webhook + polling)
+- ✅ Transient and tenant filtering
+- ✅ AI-powered triage with SRE knowledge
+- ✅ Code fix generation
+- ✅ GitHub PR creation
+- ✅ Real-time dashboard with WebSocket updates
+- ✅ Metrics tracking (MTTR, success rate)
+
+**Optional Features** (can be skipped):
+- ⚠️ CodeRabbit review (skips if not installed)
+- ⚠️ Sandbox testing (skips if Kind not available)
+- ⚠️ Production verification (can be disabled)
+- ⚠️ PagerDuty notifications (optional)
+
+**Storage Options**:
+- ✅ In-memory storage (default, for development)
+- ✅ Firestore storage (optional, for production)
 
 ---
 
@@ -1536,3 +1561,9 @@ DASHBOARD_URL=http://localhost:3000
 6. **Kind clusters**: Use ephemeral Kind clusters for testing - they match Nucleus's local dev environment
 
 7. **Draft PRs**: Always create draft PRs requiring human approval before merge
+
+8. **Local File Reading**: The fixer agent reads from local filesystem, not GitHub API - ensure Nucleus repo is cloned locally
+
+9. **GitHub CLI Required**: PR creation uses `gh` CLI - must be installed and authenticated
+
+10. **GCP Context**: Triage agent actively fetches GCP log context for better classification decisions

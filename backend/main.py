@@ -175,8 +175,18 @@ async def list_incidents(status: Optional[str] = None, limit: int = 100):
             )
 
     incidents = storage.list_incidents(status=status_filter, limit=limit)
+
+    # Include triage classification for consistent status display
+    incident_list = []
+    for inc in incidents:
+        inc_data = inc.model_dump()
+        triage = storage.get_triage_result(inc.id)
+        if triage:
+            inc_data["triage_classification"] = triage.classification.value
+        incident_list.append(inc_data)
+
     return {
-        "incidents": [i.model_dump() for i in incidents],
+        "incidents": incident_list,
         "count": len(incidents),
     }
 
@@ -637,6 +647,22 @@ async def start_gcp_polling(interval_seconds: int = 30):
 
     async def process_incident(incident):
         """Process a new incident from GCP logs."""
+        from backend.filters.transient import is_transient_error
+        from backend.filters.tenant import should_process_tenant
+
+        # Apply transient error filter
+        is_transient, transient_reason, category = is_transient_error(incident.error_message)
+        if is_transient:
+            logger.info(f"Filtered transient error [{category}]: {transient_reason} (incident: {incident.id})")
+            return
+
+        # Apply tenant filter
+        should_process, tenant_reason = should_process_tenant(tenant_name=incident.tenant_name)
+        if not should_process:
+            logger.info(f"Filtered by tenant: {tenant_reason} (incident: {incident.id})")
+            return
+
+        # Save incident after filters pass
         storage.save_incident(incident)
 
         # Broadcast to WebSocket clients
@@ -651,7 +677,7 @@ async def start_gcp_polling(interval_seconds: int = 30):
         callback = create_pipeline_event_callback()
         orchestrator = PipelineOrchestrator(
             event_callback=lambda e: asyncio.create_task(callback(e)),
-            skip_sandbox=True,
+            skip_sandbox=True,  # TODO: Enable when Kind is installed
             skip_verification=True,
         )
         try:

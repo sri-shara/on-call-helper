@@ -65,6 +65,11 @@ class Settings(BaseSettings):
 
     # ═══════════════ Storage ═══════════════
     storage_backend: str = Field("memory", description="Storage backend: 'memory' or 'firestore'")
+    firestore_project_id: str = Field(
+        "",
+        description="GCP project ID for Firestore (if different from gcp_project_id). "
+                    "Useful when Cloud Logging is in one project and Firestore in another."
+    )
 
     # ═══════════════ Dashboard ═══════════════
     dashboard_url: str = Field("http://localhost:3000", description="Dashboard URL")

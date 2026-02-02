@@ -66,8 +66,13 @@ TRANSIENT_PATTERNS: List[TransientPattern] = [
         category="race_condition",
     ),
     TransientPattern(
-        pattern=r"duplicate key value violates unique constraint.*case_events",
+        pattern=r"duplicate key value violates unique constraint",
         reason="Deduplication catching duplicates. Expected behavior.",
+        category="race_condition",
+    ),
+    TransientPattern(
+        pattern=r"Key \([^)]+\)=\([^)]+\) already exists",
+        reason="PostgreSQL duplicate key error. Race condition handled by retry.",
         category="race_condition",
     ),
     TransientPattern(
