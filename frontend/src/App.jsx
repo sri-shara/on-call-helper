@@ -662,9 +662,10 @@ function Dashboard() {
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-4 text-sm">
               <MetricPill label="Total" value={metrics.total_incidents} />
-              <MetricPill label="Fixed" value={metrics.auto_fixed} color="green" />
-              <MetricPill label="Escalated" value={metrics.escalated} color="amber" />
               <MetricPill label="Processing" value={metrics.processing} color="blue" />
+              <MetricPill label="No Action" value={metrics.no_action_needed} color="slate" />
+              <MetricPill label="Review" value={metrics.review_needed} color="amber" />
+              <MetricPill label="PR Raised" value={metrics.pr_raised} color="green" />
             </div>
 
             <div className="flex items-center gap-2 pl-4 border-l border-slate-800">

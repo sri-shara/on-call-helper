@@ -12,6 +12,7 @@ from backend.models import (
     Incident,
     IncidentStatus,
     TriageResult,
+    TriageClassification,
     FixResult,
     TestResult,
     VerificationResult,
@@ -133,39 +134,50 @@ class Storage:
         """Calculate and return current metrics."""
         incidents = list(self._incidents.values())
 
-        total = len(incidents)
-        auto_fixed = sum(1 for i in incidents if i.status == IncidentStatus.FIXED)
-        escalated = sum(1 for i in incidents if i.status == IncidentStatus.ESCALATED)
-        filtered = sum(1 for i in incidents if i.status == IncidentStatus.FILTERED)
-        processing = sum(
-            1 for i in incidents
-            if i.status not in (
-                IncidentStatus.FIXED,
-                IncidentStatus.ESCALATED,
-                IncidentStatus.FILTERED
-            )
-        )
+        processing = 0
+        no_action_needed = 0
+        review_needed = 0
+        pr_raised = 0
+
+        processing_statuses = {
+            IncidentStatus.ACTIVE,
+            IncidentStatus.TRIAGING,
+            IncidentStatus.FIXING,
+            IncidentStatus.REVIEWING,
+            IncidentStatus.TESTING,
+            IncidentStatus.VERIFYING,
+        }
+
+        for incident in incidents:
+            # Processing: any active pipeline status
+            if incident.status in processing_statuses:
+                processing += 1
+
+            # PR Raised: has PR or is fixed
+            if incident.pr_url or incident.status in {IncidentStatus.PR_CREATED, IncidentStatus.FIXED}:
+                pr_raised += 1
+
+            # For classification-based metrics, check triage results
+            triage = self._triage_results.get(incident.id)
+            if triage:
+                if triage.classification == TriageClassification.TRANSIENT:
+                    no_action_needed += 1
+                elif triage.classification in {TriageClassification.NEEDS_HUMAN, TriageClassification.INFRA_ISSUE}:
+                    review_needed += 1
 
         # Calculate MTTR
-        resolved_count = auto_fixed + escalated
+        resolved_count = pr_raised
         mttr_seconds = None
         if resolved_count > 0 and self._total_resolution_time_ms > 0:
             mttr_seconds = (self._total_resolution_time_ms / resolved_count) / 1000
 
-        # Calculate success rate
-        success_rate = None
-        processed = auto_fixed + escalated
-        if processed > 0:
-            success_rate = (auto_fixed / processed) * 100
-
         return Metrics(
-            total_incidents=total,
-            auto_fixed=auto_fixed,
-            escalated=escalated,
-            filtered=filtered,
+            total_incidents=len(incidents),
             processing=processing,
+            no_action_needed=no_action_needed,
+            review_needed=review_needed,
+            pr_raised=pr_raised,
             mttr_seconds=mttr_seconds,
-            success_rate=success_rate,
         )
 
     # ═══════════════ Utility ═══════════════

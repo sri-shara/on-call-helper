@@ -223,9 +223,8 @@ class Metrics(BaseModel):
     """Dashboard metrics."""
 
     total_incidents: int = Field(0, description="Total incidents received")
-    auto_fixed: int = Field(0, description="Successfully auto-fixed")
-    escalated: int = Field(0, description="Escalated to humans")
-    filtered: int = Field(0, description="Filtered out")
-    processing: int = Field(0, description="Currently processing")
+    processing: int = Field(0, description="Currently being processed")
+    no_action_needed: int = Field(0, description="Self-healing errors (transient)")
+    review_needed: int = Field(0, description="Requires human review")
+    pr_raised: int = Field(0, description="PRs created for fixes")
     mttr_seconds: Optional[float] = Field(None, description="Mean time to resolution")
-    success_rate: Optional[float] = Field(None, description="Success rate percentage")
