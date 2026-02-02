@@ -269,6 +269,7 @@ function IncidentDetail({ incidentId }) {
   const [details, setDetails] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [resolving, setResolving] = useState(false)
 
   useEffect(() => {
     if (!incidentId) {
@@ -293,6 +294,26 @@ function IncidentDetail({ incidentId }) {
         setLoading(false)
       })
   }, [incidentId])
+
+  const handleResolve = async () => {
+    if (!incidentId || resolving) return
+
+    setResolving(true)
+    try {
+      const res = await fetch(`/api/incidents/${incidentId}/resolve`, { method: 'POST' })
+      if (!res.ok) throw new Error('Failed to resolve incident')
+
+      // Update local state to reflect resolved status
+      setDetails(prev => ({
+        ...prev,
+        incident: { ...prev.incident, status: 'fixed' }
+      }))
+    } catch (err) {
+      console.error('Failed to resolve:', err)
+    } finally {
+      setResolving(false)
+    }
+  }
 
   if (!incidentId) {
     return (
@@ -339,10 +360,33 @@ function IncidentDetail({ incidentId }) {
             </h2>
             <p className="text-xs text-slate-500 font-mono mt-0.5">{incident.id}</p>
           </div>
-          <StatusBadge
-            status={incident.status}
-            classification={triage?.classification}
-          />
+          <div className="flex items-center gap-3">
+            {incident.status === 'escalated' && (
+              <button
+                onClick={handleResolve}
+                disabled={resolving}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg text-sm font-medium text-emerald-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {resolving ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin" />
+                    Resolving...
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                    Resolve
+                  </>
+                )}
+              </button>
+            )}
+            <StatusBadge
+              status={incident.status}
+              classification={triage?.classification}
+            />
+          </div>
         </div>
       </div>
 

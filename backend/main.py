@@ -277,6 +277,50 @@ async def get_all_incidents_with_details(status: Optional[str] = None, limit: in
     }
 
 
+@app.post("/incidents/{incident_id}/resolve", tags=["Incidents"])
+async def resolve_incident(incident_id: str):
+    """
+    Manually resolve an incident (mark as fixed).
+
+    Use this for escalated incidents that have been manually addressed.
+    """
+    from backend.websocket_manager import ws_manager
+    from datetime import datetime
+
+    incident = storage.get_incident(incident_id)
+    if not incident:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Incident not found: {incident_id}"}
+        )
+
+    # Update status to fixed
+    storage.update_incident_status(
+        incident_id,
+        IncidentStatus.FIXED,
+        resolved_at=datetime.utcnow()
+    )
+
+    # Broadcast update via WebSocket
+    await ws_manager.broadcast(
+        "incident_resolved",
+        {
+            "incident_id": incident_id,
+            "status": "fixed",
+            "resolved_at": datetime.utcnow().isoformat(),
+        }
+    )
+
+    # Broadcast updated metrics
+    await ws_manager.broadcast_metrics_update()
+
+    return {
+        "status": "resolved",
+        "incident_id": incident_id,
+        "message": f"Incident {incident_id} marked as resolved",
+    }
+
+
 # ═══════════════ History & Analytics Endpoints ═══════════════
 
 
