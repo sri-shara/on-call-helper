@@ -396,6 +396,20 @@ function IncidentDetail({ incidentId }) {
                   </ul>
                 </div>
               )}
+
+              {/* GCP Queries Used */}
+              {triage.gcp_queries?.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-medium text-slate-400 mb-2">GCP Queries Used</h4>
+                  <ul className="space-y-1.5">
+                    {triage.gcp_queries.map((query, i) => (
+                      <li key={i} className="text-xs font-mono text-slate-500 bg-slate-800/50 p-2 rounded border border-slate-700/50">
+                        {query}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           ) : (
             <div className="flex items-center gap-3 text-slate-400 py-4">

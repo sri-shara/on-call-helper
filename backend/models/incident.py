@@ -111,6 +111,7 @@ class TriageResult(BaseModel):
     # Metadata
     related_context: List[str] = Field(default_factory=list, description="Related patterns/warnings")
     gcp_context: Optional[Dict[str, Any]] = Field(None, description="Additional context fetched from GCP logs")
+    gcp_queries: Optional[List[str]] = Field(None, description="GCP queries used during triage")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

@@ -89,6 +89,7 @@ class TriageAgent:
             "error_frequency": None,
             "similar_across_services": [],
             "recent_service_logs": [],
+            "queries_used": [],  # Track GCP queries for debugging/display
         }
 
         client = self._get_gcp_client()
@@ -107,6 +108,7 @@ class TriageAgent:
             # 1. Get related errors from same service
             if incident.service_name and incident.service_name != "unknown":
                 service_filter = f'severity>=ERROR AND {time_filter} AND resource.labels.service_name="{incident.service_name}"'
+                context["queries_used"].append(f"Related errors: {service_filter}")
 
                 def fetch_service_errors():
                     return list(client.list_entries(
@@ -138,6 +140,7 @@ class TriageAgent:
                 error_phrase = self._extract_error_phrase(incident.error_message)
                 if error_phrase:
                     cross_filter = f'severity>=ERROR AND {time_filter} AND textPayload:"{error_phrase}"'
+                    context["queries_used"].append(f"Cross-service: {cross_filter}")
 
                     def fetch_cross_service():
                         return list(client.list_entries(
@@ -165,6 +168,7 @@ class TriageAgent:
             # 3. Get recent INFO/WARNING logs from the service for context
             if incident.service_name and incident.service_name != "unknown":
                 context_filter = f'severity>=INFO AND {time_filter} AND resource.labels.service_name="{incident.service_name}"'
+                context["queries_used"].append(f"Context logs: {context_filter}")
 
                 def fetch_context_logs():
                     return list(client.list_entries(
@@ -505,6 +509,9 @@ class TriageAgent:
             # Add GCP context to the result for display
             if gcp_context:
                 result.gcp_context = gcp_context
+                # Also save queries used for transparency
+                if gcp_context.get("queries_used"):
+                    result.gcp_queries = gcp_context["queries_used"]
 
             logger.info(
                 f"Triaged {incident.id}: {result.classification.value} "

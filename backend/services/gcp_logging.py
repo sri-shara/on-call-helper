@@ -194,11 +194,26 @@ def _extract_service_name(log_entry: Dict[str, Any]) -> str:
         "container_name",
         "job_name",
         "function_name",
+        "module_id",
+        "pod_name",
     ]
 
     for key in service_label_keys:
-        if key in labels:
+        if key in labels and labels[key]:
             return labels[key]
+
+    # From top-level labels
+    top_labels = log_entry.get("labels", {})
+    for key in service_label_keys:
+        if key in top_labels and top_labels[key]:
+            return top_labels[key]
+
+    # From jsonPayload
+    json_payload = log_entry.get("jsonPayload", {})
+    payload_service_keys = ["service", "serviceName", "service_name", "component", "app", "application"]
+    for key in payload_service_keys:
+        if key in json_payload and json_payload[key]:
+            return str(json_payload[key])
 
     # From log name
     log_name = log_entry.get("logName", "")
@@ -206,8 +221,16 @@ def _extract_service_name(log_entry: Dict[str, Any]) -> str:
     if "/logs/" in log_name:
         log_name_part = log_name.split("/logs/")[-1]
         # Clean up URL encoding
-        log_name_part = log_name_part.replace("%2F", "/")
-        return log_name_part.split("/")[0]
+        log_name_part = log_name_part.replace("%2F", "/").replace("%3A", ":")
+        # Extract meaningful part
+        parts = log_name_part.split("/")
+        if parts and parts[0]:
+            return parts[0]
+
+    # From resource type as last resort
+    resource_type = resource.get("type", "")
+    if resource_type and resource_type != "unknown":
+        return resource_type
 
     return "unknown-service"
 
