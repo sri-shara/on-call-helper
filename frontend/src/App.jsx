@@ -349,7 +349,17 @@ function IncidentDetail({ incidentId }) {
       <div className="p-6 space-y-6">
         {/* Analysis Section */}
         <section>
-          <SectionHeader>Analysis</SectionHeader>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Analysis</h3>
+            {incident.tenant_name && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-blue-500/10 border border-blue-500/30 rounded-md text-xs font-medium text-blue-400">
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                </svg>
+                {incident.tenant_name}
+              </span>
+            )}
+          </div>
 
           {triage ? (
             <div className="space-y-4">
