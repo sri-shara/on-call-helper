@@ -79,6 +79,15 @@ class Incident(BaseModel):
     gcp_resource_type: Optional[str] = Field(None, description="GCP resource type")
     gcp_log_name: Optional[str] = Field(None, description="GCP log name")
 
+    # Aggregation fields - for deduplication
+    occurrence_count: int = Field(1, description="Number of times this error occurred")
+    last_occurrence: Optional[datetime] = Field(None, description="Time of most recent occurrence")
+    error_signature: Optional[str] = Field(None, description="Dedup signature for aggregation")
+
+    # Auto-resolution fields - for transient errors
+    auto_resolved: bool = Field(False, description="Was auto-resolved as transient")
+    auto_resolve_reason: Optional[str] = Field(None, description="Why it was auto-resolved")
+
     class Config:
         json_encoders = {datetime: lambda v: v.isoformat()}
 

@@ -88,6 +88,25 @@ class Storage:
         """Check if we've already processed this GCP log entry."""
         return gcp_insert_id in self._seen_gcp_insert_ids
 
+    def increment_incident_count(self, incident_id: str, new_count: int) -> bool:
+        """
+        Increment the occurrence count for an aggregated incident.
+
+        Args:
+            incident_id: The incident to update
+            new_count: The new occurrence count
+
+        Returns:
+            True if updated, False if incident not found
+        """
+        from datetime import datetime
+        incident = self._incidents.get(incident_id)
+        if incident:
+            incident.occurrence_count = new_count
+            incident.last_occurrence = datetime.utcnow()
+            return True
+        return False
+
     # ═══════════════ Triage Results ═══════════════
 
     def save_triage_result(self, result: TriageResult) -> None:

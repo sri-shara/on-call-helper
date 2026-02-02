@@ -260,6 +260,33 @@ class FirestoreStorage:
 
         return False
 
+    def increment_incident_count(self, incident_id: str, new_count: int) -> bool:
+        """
+        Increment the occurrence count for an aggregated incident.
+
+        Args:
+            incident_id: The incident to update
+            new_count: The new occurrence count
+
+        Returns:
+            True if updated, False if incident not found
+        """
+        from datetime import datetime
+        try:
+            doc_ref = self.db.collection(self.INCIDENTS).document(incident_id)
+            doc = doc_ref.get()
+            if doc.exists:
+                doc_ref.update({
+                    "occurrence_count": new_count,
+                    "last_occurrence": datetime.utcnow().isoformat(),
+                })
+                logger.debug(f"Incremented incident count: {incident_id} -> {new_count}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to increment incident count: {e}")
+            return False
+
     # ═══════════════ Triage Results ═══════════════
 
     def save_triage_result(self, result: TriageResult) -> None:

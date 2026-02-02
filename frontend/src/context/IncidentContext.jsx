@@ -115,6 +115,7 @@ export function IncidentProvider({ children }) {
             status: 'active',
             createdAt: timestamp,
             stages: [],
+            occurrenceCount: data.occurrence_count || 1,
           },
         })
         break
@@ -261,6 +262,17 @@ export function IncidentProvider({ children }) {
         })
         break
 
+      case 'incident_updated':
+        // Handle occurrence count updates from aggregation
+        dispatch({
+          type: ActionTypes.UPDATE_INCIDENT,
+          payload: {
+            id: data.incident_id,
+            occurrenceCount: data.occurrence_count,
+          },
+        })
+        break
+
       default:
         // Unknown event type - just log it
         console.log('Unknown event type:', type, data)
@@ -304,6 +316,8 @@ export function IncidentProvider({ children }) {
               triage: incident.triage_classification
                 ? { classification: incident.triage_classification }
                 : undefined,
+              // Include occurrence count for aggregated incidents
+              occurrenceCount: incident.occurrence_count || 1,
             },
           })
         })

@@ -157,6 +157,11 @@ function IncidentListItem({ incident, isSelected, onClick }) {
             <span className="text-[10px] text-slate-600 font-mono">{incident.id}</span>
             <span className="text-[10px] text-slate-600">·</span>
             <span className="text-[10px] text-slate-500">{timeAgo(incident.createdAt)}</span>
+            {incident.occurrenceCount > 1 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-medium">
+                ×{incident.occurrenceCount}
+              </span>
+            )}
           </div>
         </div>
         <StatusBadge

@@ -703,26 +703,78 @@ async def _start_gcp_polling_internal(interval_seconds: int = 30):
         return {"status": "already_running", "message": "GCP polling is already active"}
 
     async def process_incident(incident):
-        """Process a new incident from GCP logs."""
+        """
+        Process a new incident from GCP logs with smart pre-processing.
+
+        Pipeline:
+        1. Service filter - skip K8s infrastructure noise
+        2. Error signature - generate for deduplication
+        3. Aggregation check - increment existing or create new
+        4. Tenant filter - skip demo tenants
+        5. Transient check - auto-resolve if transient pattern
+        6. Save and broadcast (if not aggregated)
+        7. Run triage pipeline (if not auto-resolved)
+        """
         from backend.filters.transient import is_transient_error
         from backend.filters.tenant import should_process_tenant
+        from backend.filters.service_filter import should_process_service
+        from backend.services.error_aggregator import get_error_aggregator
+        from backend.models import IncidentStatus
 
-        # Apply transient error filter
-        is_transient, transient_reason, category = is_transient_error(incident.error_message)
-        if is_transient:
-            logger.info(f"Filtered transient error [{category}]: {transient_reason} (incident: {incident.id})")
+        # 1. Service filter - skip K8s infrastructure noise
+        should_process, service_reason = should_process_service(
+            incident.service_name,
+            incident.severity.value.upper(),
+            incident.gcp_resource_type
+        )
+        if not should_process:
+            logger.info(f"Filtered: {service_reason}")
             return
 
-        # Apply tenant filter
+        # 2. Generate error signature for deduplication
+        aggregator = get_error_aggregator(window_minutes=10)
+        signature = aggregator.get_error_signature(
+            incident.service_name,
+            incident.error_message
+        )
+        incident.error_signature = signature
+
+        # 3. Check if we should aggregate with existing incident
+        existing_incident_id = aggregator.should_aggregate(signature)
+        if existing_incident_id:
+            # Increment count on existing incident instead of creating new
+            new_count = aggregator.increment_count(signature)
+            storage.increment_incident_count(existing_incident_id, new_count)
+            logger.info(f"Aggregated into {existing_incident_id} (count: {new_count})")
+            # Broadcast count update
+            await ws_manager.broadcast({
+                "type": "incident_updated",
+                "data": {
+                    "incident_id": existing_incident_id,
+                    "occurrence_count": new_count,
+                }
+            })
+            return
+
+        # 4. Apply tenant filter
         should_process, tenant_reason = should_process_tenant(tenant_name=incident.tenant_name)
         if not should_process:
             logger.info(f"Filtered by tenant: {tenant_reason} (incident: {incident.id})")
             return
 
-        # Save incident after filters pass
-        storage.save_incident(incident)
+        # 5. Check for transient patterns - create but auto-resolve
+        is_transient, transient_reason, category = is_transient_error(incident.error_message)
+        if is_transient:
+            incident.status = IncidentStatus.FILTERED
+            incident.auto_resolved = True
+            incident.auto_resolve_reason = f"[{category}] {transient_reason}"
+            logger.info(f"Auto-resolving transient [{category}]: {transient_reason}")
 
-        # Broadcast to WebSocket clients
+        # 6. Save incident and register for aggregation
+        storage.save_incident(incident)
+        aggregator.register_incident(signature, incident.id)
+
+        # 7. Broadcast to WebSocket clients
         await ws_manager.broadcast_incident_created(
             incident_id=incident.id,
             title=incident.title,
@@ -730,7 +782,11 @@ async def _start_gcp_polling_internal(interval_seconds: int = 30):
             severity=incident.severity.value,
         )
 
-        # Run pipeline
+        # 8. Run pipeline (skip for auto-resolved transient errors)
+        if incident.auto_resolved:
+            logger.info(f"Skipping pipeline for auto-resolved incident: {incident.id}")
+            return
+
         callback = create_pipeline_event_callback()
         orchestrator = PipelineOrchestrator(
             event_callback=lambda e: asyncio.create_task(callback(e)),
