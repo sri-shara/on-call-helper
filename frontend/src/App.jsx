@@ -157,6 +157,11 @@ function IncidentListItem({ incident, isSelected, onClick }) {
             <span className="text-[10px] text-slate-600 font-mono">{incident.id}</span>
             <span className="text-[10px] text-slate-600">·</span>
             <span className="text-[10px] text-slate-500">{timeAgo(incident.createdAt)}</span>
+            {incident.occurrenceCount > 1 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-medium">
+                ×{incident.occurrenceCount}
+              </span>
+            )}
           </div>
         </div>
         <StatusBadge
@@ -254,10 +259,10 @@ function CodeBlock({ code, variant = 'neutral', maxHeight = '200px' }) {
 
   return (
     <pre
-      className={`p-3 rounded-lg border text-xs font-mono overflow-auto ${variants[variant]}`}
+      className={`p-3 rounded-lg border text-xs font-mono overflow-auto whitespace-pre-wrap break-words ${variants[variant]}`}
       style={{ maxHeight }}
     >
-      <code className={textColors[variant]}>{code}</code>
+      <code className={`${textColors[variant]} break-words`}>{code}</code>
     </pre>
   )
 }
@@ -266,9 +271,11 @@ function CodeBlock({ code, variant = 'neutral', maxHeight = '200px' }) {
  * Incident detail panel
  */
 function IncidentDetail({ incidentId }) {
+  const { updateIncident, refreshMetrics } = useIncidents()
   const [details, setDetails] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [resolving, setResolving] = useState(false)
 
   useEffect(() => {
     if (!incidentId) {
@@ -293,6 +300,36 @@ function IncidentDetail({ incidentId }) {
         setLoading(false)
       })
   }, [incidentId])
+
+  const handleResolve = async () => {
+    if (!incidentId || resolving) return
+
+    setResolving(true)
+    try {
+      const res = await fetch(`/api/incidents/${incidentId}/resolve`, { method: 'POST' })
+      if (!res.ok) throw new Error('Failed to resolve incident')
+
+      console.log('Resolving incident:', incidentId)
+
+      // Update local detail state
+      setDetails(prev => ({
+        ...prev,
+        incident: { ...prev.incident, status: 'fixed' }
+      }))
+
+      // Update the incident in the list (context state)
+      updateIncident(incidentId, { status: 'fixed' })
+      console.log('Updated incident status to fixed')
+
+      // Refresh metrics from server
+      await refreshMetrics()
+      console.log('Metrics refreshed')
+    } catch (err) {
+      console.error('Failed to resolve:', err)
+    } finally {
+      setResolving(false)
+    }
+  }
 
   if (!incidentId) {
     return (
@@ -339,17 +376,51 @@ function IncidentDetail({ incidentId }) {
             </h2>
             <p className="text-xs text-slate-500 font-mono mt-0.5">{incident.id}</p>
           </div>
-          <StatusBadge
-            status={incident.status}
-            classification={triage?.classification}
-          />
+          <div className="flex items-center gap-3 flex-shrink-0">
+            {/* Resolve button - show for all non-fixed incidents */}
+            {incident.status !== 'fixed' && (
+              <button
+                onClick={handleResolve}
+                disabled={resolving}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
+              >
+                {resolving ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Resolving...
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                    Mark Resolved
+                  </>
+                )}
+              </button>
+            )}
+            <StatusBadge
+              status={incident.status}
+              classification={triage?.classification}
+            />
+          </div>
         </div>
       </div>
 
       <div className="p-6 space-y-6">
         {/* Analysis Section */}
         <section>
-          <SectionHeader>Analysis</SectionHeader>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Analysis</h3>
+            {incident.tenant_name && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-blue-500/10 border border-blue-500/30 rounded-md text-xs font-medium text-blue-400">
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                </svg>
+                {incident.tenant_name}
+              </span>
+            )}
+          </div>
 
           {triage ? (
             <div className="space-y-4">
@@ -361,7 +432,7 @@ function IncidentDetail({ incidentId }) {
               {/* Root Cause */}
               <div>
                 <h4 className="text-xs font-medium text-slate-400 mb-2">Root Cause</h4>
-                <div className="bg-slate-800/50 rounded-lg p-3 text-sm text-slate-300 leading-relaxed">
+                <div className="bg-slate-800/50 rounded-lg p-3 text-sm text-slate-300 leading-relaxed break-words overflow-hidden">
                   {triage.root_cause}
                 </div>
               </div>
@@ -376,7 +447,7 @@ function IncidentDetail({ incidentId }) {
               {triage.suggested_fix && (
                 <div>
                   <h4 className="text-xs font-medium text-slate-400 mb-2">Suggested Approach</h4>
-                  <div className="bg-slate-800/50 rounded-lg p-3 text-sm text-slate-300">
+                  <div className="bg-slate-800/50 rounded-lg p-3 text-sm text-slate-300 break-words overflow-hidden">
                     {triage.suggested_fix}
                   </div>
                 </div>
@@ -391,6 +462,99 @@ function IncidentDetail({ incidentId }) {
                       <li key={i} className="flex items-start gap-2 text-sm text-slate-400">
                         <span className="text-slate-600 mt-0.5">•</span>
                         <span>{ctx}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Pre-Analysis Insights */}
+              {triage.pre_analysis && (
+                <div className="space-y-3">
+                  <h4 className="text-xs font-medium text-slate-400 mb-2">Pre-Analysis Insights</h4>
+
+                  {/* Pattern Match */}
+                  {triage.pre_analysis.pattern_match && (
+                    <div className="bg-purple-500/5 border border-purple-500/20 rounded-lg p-3 break-words overflow-hidden">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span className="text-purple-400 text-xs font-medium">Pattern Matched</span>
+                        <span className="text-xs text-purple-300/60 bg-purple-500/20 px-1.5 py-0.5 rounded">
+                          +{((triage.pre_analysis.pattern_confidence_boost || 0) * 100).toFixed(0)}% confidence
+                        </span>
+                      </div>
+                      <code className="text-xs text-purple-300/80 block mb-1 break-all">
+                        {triage.pre_analysis.pattern_match}
+                      </code>
+                      {triage.pre_analysis.pattern_reason && (
+                        <p className="text-xs text-purple-200/60 break-words">{triage.pre_analysis.pattern_reason}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Tenant Type (show only for demo) */}
+                  {triage.pre_analysis.is_demo_tenant && (
+                    <div className="bg-slate-500/10 border border-slate-500/20 rounded-lg p-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-400 text-xs font-medium">Demo Tenant</span>
+                        <span className="text-xs text-slate-500">Lower priority</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Infrastructure Health */}
+                  {triage.pre_analysis.infra_health && triage.pre_analysis.infra_health.overall_status !== 'healthy' && (
+                    <div className={`rounded-lg p-3 break-words overflow-hidden ${
+                      triage.pre_analysis.infra_health.overall_status === 'critical'
+                        ? 'bg-red-500/5 border border-red-500/20'
+                        : 'bg-amber-500/5 border border-amber-500/20'
+                    }`}>
+                      <div className="flex items-center gap-2 mb-2 flex-wrap">
+                        <span className={`text-xs font-medium ${
+                          triage.pre_analysis.infra_health.overall_status === 'critical' ? 'text-red-400' : 'text-amber-400'
+                        }`}>
+                          Infrastructure: {triage.pre_analysis.infra_health.overall_status.toUpperCase()}
+                        </span>
+                        {triage.pre_analysis.infra_health.cross_tenant_affected && (
+                          <span className="text-xs text-amber-300/60">
+                            ({triage.pre_analysis.infra_health.affected_tenant_count} tenants affected)
+                          </span>
+                        )}
+                      </div>
+                      {triage.pre_analysis.infra_health.checks?.filter(c => c.status !== 'healthy').map((check, i) => (
+                        <p key={i} className="text-xs text-slate-400 break-words">
+                          • {check.component}: {check.message}
+                        </p>
+                      ))}
+                      {triage.pre_analysis.infra_health.recommendations?.map((rec, i) => (
+                        <p key={i} className="text-xs text-amber-300/70 mt-1">{rec}</p>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Runbook Suggestion */}
+                  {triage.pre_analysis.runbook_suggestion && (
+                    <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-3 break-words overflow-hidden">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-blue-400 text-xs font-medium">Suggested Runbook</span>
+                      </div>
+                      <p className="text-xs text-blue-300/80 break-words">{triage.pre_analysis.runbook_suggestion.name}</p>
+                      {triage.pre_analysis.runbook_suggestion.section && (
+                        <p className="text-xs text-blue-200/60 break-words">Section: {triage.pre_analysis.runbook_suggestion.section}</p>
+                      )}
+                      <p className="text-xs text-slate-500 mt-1 break-all">{triage.pre_analysis.runbook_suggestion.path}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* GCP Queries Used */}
+              {triage.gcp_queries?.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-medium text-slate-400 mb-2">GCP Queries Used</h4>
+                  <ul className="space-y-1.5">
+                    {triage.gcp_queries.map((query, i) => (
+                      <li key={i} className="text-xs font-mono text-slate-500 bg-slate-800/50 p-2 rounded border border-slate-700/50 break-all overflow-x-auto">
+                        {query}
                       </li>
                     ))}
                   </ul>
@@ -520,7 +684,7 @@ function IncidentDetail({ incidentId }) {
         {triage && triage.classification !== 'fixable' && !fix && (
           <section>
             <SectionHeader>Resolution</SectionHeader>
-            <div className={`rounded-lg border p-4 ${
+            <div className={`rounded-lg border p-4 break-words overflow-hidden ${
               triage.classification === 'transient' ? 'bg-slate-800/50 border-slate-700' :
               triage.classification === 'infra_issue' ? 'bg-amber-500/5 border-amber-500/20' :
               'bg-red-500/5 border-red-500/20'
@@ -552,9 +716,17 @@ function IncidentDetail({ incidentId }) {
               {triage.classification === 'needs_human' && (
                 <>
                   <h4 className="text-red-400 font-medium mb-1">Human Review Required</h4>
-                  <p className="text-sm text-red-200/70">
+                  <p className="text-sm text-red-200/70 mb-2">
                     This issue is too complex for automated resolution. Manual investigation needed.
                   </p>
+                  {triage.runbook_reference && (
+                    <p className="text-xs text-red-200/60 mb-2">Runbook: {triage.runbook_reference}</p>
+                  )}
+                  {triage.manual_steps?.length > 0 && (
+                    <ol className="text-sm text-red-200/70 space-y-1 list-decimal list-inside">
+                      {triage.manual_steps.map((step, i) => <li key={i}>{step}</li>)}
+                    </ol>
+                  )}
                 </>
               )}
             </div>
@@ -598,10 +770,23 @@ function Dashboard() {
     if (filter !== 'all') {
       list = list.filter(inc => {
         const classification = inc.triage?.classification || inc.escalation?.classification
-        if (filter === 'fixed') return inc.status === 'fixed' || inc.status === 'pr_created'
-        if (filter === 'processing') return ['active', 'triaging', 'fixing', 'testing', 'reviewing'].includes(inc.status)
-        if (filter === 'escalated') return inc.status === 'escalated'
-        if (filter === 'self-healing') return classification === 'transient'
+        const status = inc.status
+
+        if (filter === 'fixed') {
+          return status === 'fixed' || status === 'pr_created'
+        }
+        if (filter === 'processing') {
+          return ['active', 'triaging', 'fixing', 'testing', 'reviewing', 'verifying'].includes(status)
+        }
+        if (filter === 'escalated') {
+          // Review = escalated OR (needs human attention AND not yet fixed)
+          const needsReview = classification === 'needs_human' || classification === 'infra_issue'
+          const notFixed = status !== 'fixed' && status !== 'pr_created'
+          return status === 'escalated' || (needsReview && notFixed)
+        }
+        if (filter === 'self-healing') {
+          return classification === 'transient'
+        }
         return true
       })
     }
@@ -638,9 +823,10 @@ function Dashboard() {
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-4 text-sm">
               <MetricPill label="Total" value={metrics.total_incidents} />
-              <MetricPill label="Fixed" value={metrics.auto_fixed} color="green" />
-              <MetricPill label="Escalated" value={metrics.escalated} color="amber" />
               <MetricPill label="Processing" value={metrics.processing} color="blue" />
+              <MetricPill label="No Action" value={metrics.no_action_needed} color="slate" />
+              <MetricPill label="Review" value={metrics.review_needed} color="amber" />
+              <MetricPill label="PR Raised" value={metrics.pr_raised} color="green" />
             </div>
 
             <div className="flex items-center gap-2 pl-4 border-l border-slate-800">

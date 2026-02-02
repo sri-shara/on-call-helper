@@ -545,11 +545,16 @@ class PipelineOrchestrator:
         triage_result: Optional[TriageResult] = None,
     ) -> None:
         """Handle escalation to human attention."""
+        # Include classification in event data for frontend display
+        event_data = {"reason": reason.value}
+        if triage_result:
+            event_data["classification"] = triage_result.classification.value
+
         self._emit_event(
             incident.id,
             PipelineStage.ESCALATED,
             f"Escalating to human: {error_message}",
-            data={"reason": reason.value},
+            data=event_data,
         )
 
         self._update_incident_status(incident.id, IncidentStatus.ESCALATED)

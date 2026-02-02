@@ -7,12 +7,11 @@ const initialState = {
   events: [],
   metrics: {
     total_incidents: 0,
-    auto_fixed: 0,
-    escalated: 0,
-    filtered: 0,
     processing: 0,
+    no_action_needed: 0,
+    review_needed: 0,
+    pr_raised: 0,
     mttr_seconds: null,
-    success_rate: null,
   },
   isConnected: false,
   clientId: null,
@@ -116,6 +115,7 @@ export function IncidentProvider({ children }) {
             status: 'active',
             createdAt: timestamp,
             stages: [],
+            occurrenceCount: data.occurrence_count || 1,
           },
         })
         break
@@ -262,6 +262,17 @@ export function IncidentProvider({ children }) {
         })
         break
 
+      case 'incident_updated':
+        // Handle occurrence count updates from aggregation
+        dispatch({
+          type: ActionTypes.UPDATE_INCIDENT,
+          payload: {
+            id: data.incident_id,
+            occurrenceCount: data.occurrence_count,
+          },
+        })
+        break
+
       default:
         // Unknown event type - just log it
         console.log('Unknown event type:', type, data)
@@ -305,6 +316,8 @@ export function IncidentProvider({ children }) {
               triage: incident.triage_classification
                 ? { classification: incident.triage_classification }
                 : undefined,
+              // Include occurrence count for aggregated incidents
+              occurrenceCount: incident.occurrence_count || 1,
             },
           })
         })
@@ -321,6 +334,27 @@ export function IncidentProvider({ children }) {
     }
   }, [isConnected, fetchIncidents])
 
+  // Update an incident in the local state
+  const updateIncident = useCallback((id, updates) => {
+    dispatch({
+      type: ActionTypes.UPDATE_INCIDENT,
+      payload: { id, ...updates },
+    })
+  }, [])
+
+  // Refresh metrics from the server
+  const refreshMetrics = useCallback(async () => {
+    try {
+      const response = await fetch('/api/metrics')
+      if (response.ok) {
+        const metrics = await response.json()
+        dispatch({ type: ActionTypes.SET_METRICS, payload: metrics })
+      }
+    } catch (error) {
+      console.error('Failed to refresh metrics:', error)
+    }
+  }, [])
+
   // Context value
   const value = {
     ...state,
@@ -329,6 +363,8 @@ export function IncidentProvider({ children }) {
     subscribe,
     unsubscribe,
     fetchIncidents,
+    updateIncident,
+    refreshMetrics,
     clearEvents: () => dispatch({ type: ActionTypes.CLEAR_EVENTS }),
   }
 

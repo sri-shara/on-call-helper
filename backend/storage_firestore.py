@@ -260,6 +260,33 @@ class FirestoreStorage:
 
         return False
 
+    def increment_incident_count(self, incident_id: str, new_count: int) -> bool:
+        """
+        Increment the occurrence count for an aggregated incident.
+
+        Args:
+            incident_id: The incident to update
+            new_count: The new occurrence count
+
+        Returns:
+            True if updated, False if incident not found
+        """
+        from datetime import datetime
+        try:
+            doc_ref = self.db.collection(self.INCIDENTS).document(incident_id)
+            doc = doc_ref.get()
+            if doc.exists:
+                doc_ref.update({
+                    "occurrence_count": new_count,
+                    "last_occurrence": datetime.utcnow().isoformat(),
+                })
+                logger.debug(f"Incremented incident count: {incident_id} -> {new_count}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to increment incident count: {e}")
+            return False
+
     # ═══════════════ Triage Results ═══════════════
 
     def save_triage_result(self, result: TriageResult) -> None:
@@ -357,59 +384,73 @@ class FirestoreStorage:
     def get_metrics(self) -> Metrics:
         """Calculate metrics by querying Firestore."""
         try:
-            # Count by status
             incidents_ref = self.db.collection(self.INCIDENTS)
+            triage_ref = self.db.collection(self.TRIAGE_RESULTS)
 
             # Get all incidents for metrics calculation
             all_incidents = list(incidents_ref.stream())
 
-            total = len(all_incidents)
-            auto_fixed = 0
-            escalated = 0
-            filtered = 0
+            # Build a lookup of triage results by incident_id
+            triage_by_incident = {}
+            for doc in triage_ref.stream():
+                data = doc.to_dict()
+                incident_id = data.get("incident_id")
+                if incident_id:
+                    triage_by_incident[incident_id] = data
+
             processing = 0
+            no_action_needed = 0
+            review_needed = 0
+            pr_raised = 0
             total_resolution_time_ms = 0
+
+            processing_statuses = {
+                IncidentStatus.ACTIVE.value,
+                IncidentStatus.TRIAGING.value,
+                IncidentStatus.FIXING.value,
+                IncidentStatus.REVIEWING.value,
+                IncidentStatus.TESTING.value,
+                IncidentStatus.VERIFYING.value,
+            }
 
             for doc in all_incidents:
                 data = doc.to_dict()
+                incident_id = doc.id
                 status = data.get("status", "")
 
-                if status == IncidentStatus.FIXED.value:
-                    auto_fixed += 1
+                # Processing: any active pipeline status
+                if status in processing_statuses:
+                    processing += 1
+
+                # PR Raised: has PR or is fixed
+                if data.get("pr_url") or status in {IncidentStatus.PR_CREATED.value, IncidentStatus.FIXED.value}:
+                    pr_raised += 1
                     # Calculate resolution time
                     if data.get("resolved_at") and data.get("created_at"):
                         delta = data["resolved_at"] - data["created_at"]
                         total_resolution_time_ms += int(delta.total_seconds() * 1000)
-                elif status == IncidentStatus.ESCALATED.value:
-                    escalated += 1
-                    if data.get("resolved_at") and data.get("created_at"):
-                        delta = data["resolved_at"] - data["created_at"]
-                        total_resolution_time_ms += int(delta.total_seconds() * 1000)
-                elif status == IncidentStatus.FILTERED.value:
-                    filtered += 1
-                else:
-                    processing += 1
+
+                # For classification-based metrics, check triage results
+                triage = triage_by_incident.get(incident_id)
+                if triage:
+                    classification = triage.get("classification", "")
+                    if classification == TriageClassification.TRANSIENT.value:
+                        no_action_needed += 1
+                    elif classification in {TriageClassification.NEEDS_HUMAN.value, TriageClassification.INFRA_ISSUE.value}:
+                        review_needed += 1
 
             # Calculate MTTR
-            resolved_count = auto_fixed + escalated
             mttr_seconds = None
-            if resolved_count > 0 and total_resolution_time_ms > 0:
-                mttr_seconds = (total_resolution_time_ms / resolved_count) / 1000
-
-            # Calculate success rate
-            success_rate = None
-            processed = auto_fixed + escalated
-            if processed > 0:
-                success_rate = (auto_fixed / processed) * 100
+            if pr_raised > 0 and total_resolution_time_ms > 0:
+                mttr_seconds = (total_resolution_time_ms / pr_raised) / 1000
 
             return Metrics(
-                total_incidents=total,
-                auto_fixed=auto_fixed,
-                escalated=escalated,
-                filtered=filtered,
+                total_incidents=len(all_incidents),
                 processing=processing,
+                no_action_needed=no_action_needed,
+                review_needed=review_needed,
+                pr_raised=pr_raised,
                 mttr_seconds=mttr_seconds,
-                success_rate=success_rate,
             )
         except Exception as e:
             logger.error(f"Failed to get metrics: {e}")

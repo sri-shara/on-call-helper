@@ -79,6 +79,15 @@ class Incident(BaseModel):
     gcp_resource_type: Optional[str] = Field(None, description="GCP resource type")
     gcp_log_name: Optional[str] = Field(None, description="GCP log name")
 
+    # Aggregation fields - for deduplication
+    occurrence_count: int = Field(1, description="Number of times this error occurred")
+    last_occurrence: Optional[datetime] = Field(None, description="Time of most recent occurrence")
+    error_signature: Optional[str] = Field(None, description="Dedup signature for aggregation")
+
+    # Auto-resolution fields - for transient errors
+    auto_resolved: bool = Field(False, description="Was auto-resolved as transient")
+    auto_resolve_reason: Optional[str] = Field(None, description="Why it was auto-resolved")
+
     class Config:
         json_encoders = {datetime: lambda v: v.isoformat()}
 
@@ -111,6 +120,12 @@ class TriageResult(BaseModel):
     # Metadata
     related_context: List[str] = Field(default_factory=list, description="Related patterns/warnings")
     gcp_context: Optional[Dict[str, Any]] = Field(None, description="Additional context fetched from GCP logs")
+    gcp_queries: Optional[List[str]] = Field(None, description="GCP queries used during triage")
+
+    # Pre-analysis results from pattern matching and health checks
+    pre_analysis: Optional[Dict[str, Any]] = Field(None, description="Pre-analysis results (patterns, tenant, infra)")
+    tenant_type: Optional[str] = Field(None, description="Tenant type: production, demo, or unknown")
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -222,9 +237,8 @@ class Metrics(BaseModel):
     """Dashboard metrics."""
 
     total_incidents: int = Field(0, description="Total incidents received")
-    auto_fixed: int = Field(0, description="Successfully auto-fixed")
-    escalated: int = Field(0, description="Escalated to humans")
-    filtered: int = Field(0, description="Filtered out")
-    processing: int = Field(0, description="Currently processing")
+    processing: int = Field(0, description="Currently being processed")
+    no_action_needed: int = Field(0, description="Self-healing errors (transient)")
+    review_needed: int = Field(0, description="Requires human review")
+    pr_raised: int = Field(0, description="PRs created for fixes")
     mttr_seconds: Optional[float] = Field(None, description="Mean time to resolution")
-    success_rate: Optional[float] = Field(None, description="Success rate percentage")

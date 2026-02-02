@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     gcp_project_id: str = Field("", description="GCP project ID")
     gcp_credentials_path: str = Field("", description="Path to GCP credentials JSON")
     gcp_log_filter: str = Field("severity>=ERROR", description="Cloud Logging filter")
+    gcp_auto_poll: bool = Field(True, description="Auto-start GCP polling on backend startup")
+    gcp_poll_interval: int = Field(30, description="GCP polling interval in seconds")
 
     # ═══════════════ GitHub ═══════════════
     github_token: str = Field("", description="GitHub personal access token")
