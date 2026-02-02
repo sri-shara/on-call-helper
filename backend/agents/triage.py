@@ -4,8 +4,12 @@ Triage Agent for On Call Helper.
 Uses Claude AI with embedded SRE knowledge to analyze production incidents
 and classify them for appropriate action.
 
-Enhanced with GCP log context fetching - instead of saying "need more details",
-the agent actively queries GCP logs to gather additional context.
+Enhanced with:
+- GCP log context fetching
+- Error pattern recognition (47 known patterns)
+- Tenant classification (production vs demo)
+- Infrastructure health checks
+- Runbook suggestions
 """
 
 import asyncio
@@ -19,7 +23,26 @@ from anthropic import Anthropic, APIError, APIConnectionError, RateLimitError
 from pydantic import ValidationError
 
 from backend.config import settings
-from backend.knowledge import get_triage_system_prompt, load_sre_knowledge
+from backend.knowledge import (
+    get_triage_system_prompt,
+    load_sre_knowledge,
+    # Error patterns
+    get_pattern_classification,
+    match_error_pattern,
+    PatternSeverity,
+    # Tenant classification
+    is_demo_tenant,
+    is_production_tenant,
+    get_tenant_priority,
+    classify_tenant_by_name,
+    TenantType,
+    # Infrastructure checks
+    run_quick_health_check,
+    HealthStatus,
+    # Runbooks
+    suggest_runbook,
+    get_investigation_steps,
+)
 from backend.models import (
     Incident,
     TriageResult,
@@ -62,6 +85,114 @@ class TriageAgent:
         # Lazy initialize client when needed
         if self.api_key:
             self.client = Anthropic(api_key=self.api_key)
+
+    async def _pre_analyze(self, incident: Incident) -> Dict[str, Any]:
+        """
+        Perform pre-analysis using pattern matching and tenant classification.
+
+        This runs BEFORE calling Claude to:
+        1. Quickly classify known error patterns
+        2. Check tenant type (production vs demo)
+        3. Run infrastructure health checks
+        4. Suggest relevant runbooks
+
+        Returns:
+            Dict with pre-analysis results that can influence final triage
+        """
+        pre_analysis = {
+            "pattern_match": None,
+            "pattern_classification": None,
+            "pattern_confidence_boost": 0.0,
+            "pattern_reason": None,
+            "pattern_action": None,
+            "tenant_type": TenantType.UNKNOWN,
+            "tenant_priority": 2,
+            "is_demo_tenant": False,
+            "infra_health": None,
+            "is_infra_issue": False,
+            "runbook_suggestion": None,
+            "manual_steps": [],
+        }
+
+        # 1. Pattern matching for known errors
+        logger.info(f"Running pattern matching for {incident.id}...")
+        pattern_result = match_error_pattern(incident.error_message)
+        if pattern_result:
+            pattern, match_text = pattern_result
+            pre_analysis["pattern_match"] = match_text
+            pre_analysis["pattern_reason"] = pattern.reason
+
+            classification, confidence_boost, reason, action = get_pattern_classification(incident.error_message)
+            pre_analysis["pattern_classification"] = classification
+            pre_analysis["pattern_confidence_boost"] = confidence_boost
+            if action:
+                pre_analysis["pattern_action"] = action
+
+            logger.info(
+                f"Pattern matched for {incident.id}: {match_text[:50]}... "
+                f"-> {classification} (+{confidence_boost:.1f} confidence)"
+            )
+
+        # 2. Tenant classification
+        tenant_type = classify_tenant_by_name(incident.tenant_name) if incident.tenant_name else TenantType.UNKNOWN
+        pre_analysis["tenant_type"] = tenant_type
+        pre_analysis["tenant_priority"] = get_tenant_priority(tenant_name=incident.tenant_name)
+        pre_analysis["is_demo_tenant"] = is_demo_tenant(tenant_name=incident.tenant_name)
+
+        if pre_analysis["is_demo_tenant"]:
+            logger.info(f"Incident {incident.id} is from demo tenant: {incident.tenant_name}")
+
+        # 3. Infrastructure health checks (async)
+        try:
+            logger.info(f"Running infrastructure health checks for {incident.id}...")
+            health_report = await run_quick_health_check(incident.error_message)
+            pre_analysis["infra_health"] = {
+                "overall_status": health_report.overall_status.value,
+                "is_infrastructure_issue": health_report.is_infrastructure_issue,
+                "cross_tenant_affected": health_report.cross_tenant_affected,
+                "affected_tenant_count": health_report.affected_tenant_count,
+                "checks": [
+                    {
+                        "component": c.component,
+                        "status": c.status.value,
+                        "value": c.value,
+                        "message": c.message,
+                    }
+                    for c in health_report.checks
+                ],
+                "recommendations": health_report.recommendations,
+            }
+            pre_analysis["is_infra_issue"] = health_report.is_infrastructure_issue
+
+            if health_report.is_infrastructure_issue:
+                logger.warning(
+                    f"Infrastructure issue detected for {incident.id}: "
+                    f"status={health_report.overall_status.value}, "
+                    f"cross_tenant={health_report.cross_tenant_affected}"
+                )
+
+        except Exception as e:
+            logger.warning(f"Infrastructure health check failed for {incident.id}: {e}")
+
+        # 4. Runbook suggestion
+        runbook = suggest_runbook(incident.error_message, incident.service_name)
+        if runbook:
+            pre_analysis["runbook_suggestion"] = {
+                "path": runbook.runbook_path,
+                "name": runbook.runbook_name,
+                "relevance": runbook.relevance_score,
+                "reason": runbook.reason,
+                "section": runbook.specific_section,
+            }
+            logger.info(f"Suggested runbook for {incident.id}: {runbook.runbook_name}")
+
+        # 5. Get manual investigation steps
+        pre_analysis["manual_steps"] = get_investigation_steps(
+            incident.error_message,
+            pre_analysis.get("pattern_classification", "NEEDS_HUMAN")
+        )
+
+        return pre_analysis
 
     def _get_gcp_client(self):
         """Get or create GCP Logging client for context fetching."""
@@ -235,8 +366,13 @@ class TriageAgent:
             self._system_prompt = get_triage_system_prompt()
         return self._system_prompt
 
-    def _format_incident(self, incident: Incident, gcp_context: Optional[Dict[str, Any]] = None) -> str:
-        """Format an incident for Claude analysis, including GCP context."""
+    def _format_incident(
+        self,
+        incident: Incident,
+        gcp_context: Optional[Dict[str, Any]] = None,
+        pre_analysis: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Format an incident for Claude analysis, including GCP context and pre-analysis."""
         parts = [
             f"## Incident: {incident.id}",
             f"**Title**: {incident.title}",
@@ -249,6 +385,62 @@ class TriageAgent:
             incident.error_message,
             "```",
         ]
+
+        # Add pre-analysis hints
+        if pre_analysis:
+            parts.extend(["", "### Pre-Analysis (Pattern Matching & Health Checks)"])
+
+            # Pattern match info
+            if pre_analysis.get("pattern_match"):
+                parts.extend([
+                    "",
+                    f"**Known Pattern Detected**: `{pre_analysis['pattern_match']}`",
+                    f"- Suggested Classification: **{pre_analysis.get('pattern_classification', 'UNKNOWN')}**",
+                    f"- Reason: {pre_analysis.get('pattern_reason', 'N/A')}",
+                ])
+                if pre_analysis.get("pattern_action"):
+                    parts.append(f"- Recommended Action: {pre_analysis['pattern_action']}")
+
+            # Tenant info
+            tenant_type = pre_analysis.get("tenant_type")
+            if tenant_type:
+                tenant_label = "DEMO (lower priority)" if pre_analysis.get("is_demo_tenant") else tenant_type.value.upper()
+                parts.append(f"")
+                parts.append(f"**Tenant Type**: {tenant_label}")
+
+            # Infrastructure health
+            if pre_analysis.get("infra_health"):
+                health = pre_analysis["infra_health"]
+                parts.extend([
+                    "",
+                    f"**Infrastructure Health**: {health['overall_status'].upper()}",
+                ])
+                if health.get("is_infrastructure_issue"):
+                    parts.append("- **WARNING**: Infrastructure issue detected!")
+                if health.get("cross_tenant_affected"):
+                    parts.append(f"- Cross-tenant impact: {health['affected_tenant_count']} tenants affected")
+                for check in health.get("checks", []):
+                    if check["status"] != "healthy":
+                        parts.append(f"- {check['component']}: {check['status'].upper()} - {check['message']}")
+                for rec in health.get("recommendations", []):
+                    parts.append(f"- {rec}")
+
+            # Runbook suggestion
+            if pre_analysis.get("runbook_suggestion"):
+                rb = pre_analysis["runbook_suggestion"]
+                parts.extend([
+                    "",
+                    f"**Suggested Runbook**: {rb['name']} ({rb['path']})",
+                ])
+                if rb.get("section"):
+                    parts.append(f"- Specific Section: {rb['section']}")
+
+            parts.extend([
+                "",
+                "**IMPORTANT**: Use the pre-analysis above to inform your classification.",
+                "If a known pattern was matched, weight that heavily in your decision.",
+                "If infrastructure issues were detected, consider INFRA_ISSUE classification.",
+            ])
 
         if incident.stack_trace:
             parts.extend([
@@ -458,7 +650,10 @@ class TriageAgent:
         """
         Analyze an incident and return triage result.
 
-        Enhanced to fetch additional context from GCP logs before analysis.
+        Enhanced with:
+        - Pre-analysis (pattern matching, tenant classification, infra checks)
+        - GCP log context fetching
+        - Runbook suggestions
 
         Args:
             incident: The incident to analyze
@@ -475,7 +670,15 @@ class TriageAgent:
 
         logger.info(f"Triaging incident {incident.id}: {incident.title}")
 
-        # Fetch GCP context for better triage
+        # 1. Run pre-analysis (pattern matching, tenant classification, infra checks)
+        pre_analysis = None
+        try:
+            pre_analysis = await self._pre_analyze(incident)
+        except Exception as e:
+            logger.warning(f"Pre-analysis failed for {incident.id}: {e}")
+            # Continue without pre-analysis
+
+        # 2. Fetch GCP context for better triage
         gcp_context = None
         if fetch_gcp_context:
             try:
@@ -491,13 +694,14 @@ class TriageAgent:
                 logger.warning(f"Failed to fetch GCP context for {incident.id}: {e}")
                 # Continue without context - don't block triage
 
+        # 3. Call Claude for analysis
         try:
             message = self.client.messages.create(
                 model=self.model,
                 max_tokens=4096,
                 system=self.system_prompt,
                 messages=[
-                    {"role": "user", "content": self._format_incident(incident, gcp_context)}
+                    {"role": "user", "content": self._format_incident(incident, gcp_context, pre_analysis)}
                 ]
             )
 
@@ -506,7 +710,46 @@ class TriageAgent:
 
             result = self._parse_response(response_text, incident.id)
 
-            # Add GCP context to the result for display
+            # 4. Apply pre-analysis enhancements to result
+            if pre_analysis:
+                # Apply confidence boost from pattern matching
+                if pre_analysis.get("pattern_confidence_boost"):
+                    original_confidence = result.confidence
+                    result.confidence = min(1.0, result.confidence + pre_analysis["pattern_confidence_boost"])
+                    logger.info(
+                        f"Applied pattern confidence boost for {incident.id}: "
+                        f"{original_confidence:.2f} -> {result.confidence:.2f}"
+                    )
+
+                # Override classification if infra issue detected and Claude didn't catch it
+                if pre_analysis.get("is_infra_issue") and result.classification != TriageClassification.INFRA_ISSUE:
+                    logger.warning(
+                        f"Overriding classification for {incident.id}: "
+                        f"{result.classification.value} -> INFRA_ISSUE (infrastructure issue detected)"
+                    )
+                    result.classification = TriageClassification.INFRA_ISSUE
+
+                # Add runbook reference if not already present
+                if pre_analysis.get("runbook_suggestion") and not result.runbook_reference:
+                    rb = pre_analysis["runbook_suggestion"]
+                    result.runbook_reference = f"{rb['name']} ({rb['path']})"
+                    if rb.get("section"):
+                        result.runbook_reference += f" - {rb['section']}"
+
+                # Add manual steps if not already present
+                if pre_analysis.get("manual_steps") and not result.manual_steps:
+                    result.manual_steps = pre_analysis["manual_steps"]
+
+                # Store pre-analysis for display
+                result.pre_analysis = pre_analysis
+
+                # Add tenant info for display
+                if pre_analysis.get("is_demo_tenant"):
+                    result.tenant_type = "demo"
+                    # Optionally downgrade priority for demo tenants
+                    logger.info(f"Incident {incident.id} is from demo tenant - lower priority")
+
+            # 5. Add GCP context to the result for display
             if gcp_context:
                 result.gcp_context = gcp_context
                 # Also save queries used for transparency

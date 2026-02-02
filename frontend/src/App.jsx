@@ -467,6 +467,85 @@ function IncidentDetail({ incidentId }) {
                 </div>
               )}
 
+              {/* Pre-Analysis Insights */}
+              {triage.pre_analysis && (
+                <div className="space-y-3">
+                  <h4 className="text-xs font-medium text-slate-400 mb-2">Pre-Analysis Insights</h4>
+
+                  {/* Pattern Match */}
+                  {triage.pre_analysis.pattern_match && (
+                    <div className="bg-purple-500/5 border border-purple-500/20 rounded-lg p-3">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-purple-400 text-xs font-medium">Pattern Matched</span>
+                        <span className="text-xs text-purple-300/60 bg-purple-500/20 px-1.5 py-0.5 rounded">
+                          +{((triage.pre_analysis.pattern_confidence_boost || 0) * 100).toFixed(0)}% confidence
+                        </span>
+                      </div>
+                      <code className="text-xs text-purple-300/80 block mb-1">
+                        {triage.pre_analysis.pattern_match}
+                      </code>
+                      {triage.pre_analysis.pattern_reason && (
+                        <p className="text-xs text-purple-200/60">{triage.pre_analysis.pattern_reason}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Tenant Type (show only for demo) */}
+                  {triage.pre_analysis.is_demo_tenant && (
+                    <div className="bg-slate-500/10 border border-slate-500/20 rounded-lg p-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-400 text-xs font-medium">Demo Tenant</span>
+                        <span className="text-xs text-slate-500">Lower priority</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Infrastructure Health */}
+                  {triage.pre_analysis.infra_health && triage.pre_analysis.infra_health.overall_status !== 'healthy' && (
+                    <div className={`rounded-lg p-3 ${
+                      triage.pre_analysis.infra_health.overall_status === 'critical'
+                        ? 'bg-red-500/5 border border-red-500/20'
+                        : 'bg-amber-500/5 border border-amber-500/20'
+                    }`}>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className={`text-xs font-medium ${
+                          triage.pre_analysis.infra_health.overall_status === 'critical' ? 'text-red-400' : 'text-amber-400'
+                        }`}>
+                          Infrastructure: {triage.pre_analysis.infra_health.overall_status.toUpperCase()}
+                        </span>
+                        {triage.pre_analysis.infra_health.cross_tenant_affected && (
+                          <span className="text-xs text-amber-300/60">
+                            ({triage.pre_analysis.infra_health.affected_tenant_count} tenants affected)
+                          </span>
+                        )}
+                      </div>
+                      {triage.pre_analysis.infra_health.checks?.filter(c => c.status !== 'healthy').map((check, i) => (
+                        <p key={i} className="text-xs text-slate-400">
+                          • {check.component}: {check.message}
+                        </p>
+                      ))}
+                      {triage.pre_analysis.infra_health.recommendations?.map((rec, i) => (
+                        <p key={i} className="text-xs text-amber-300/70 mt-1">{rec}</p>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Runbook Suggestion */}
+                  {triage.pre_analysis.runbook_suggestion && (
+                    <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-3">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-blue-400 text-xs font-medium">Suggested Runbook</span>
+                      </div>
+                      <p className="text-xs text-blue-300/80">{triage.pre_analysis.runbook_suggestion.name}</p>
+                      {triage.pre_analysis.runbook_suggestion.section && (
+                        <p className="text-xs text-blue-200/60">Section: {triage.pre_analysis.runbook_suggestion.section}</p>
+                      )}
+                      <p className="text-xs text-slate-500 mt-1">{triage.pre_analysis.runbook_suggestion.path}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* GCP Queries Used */}
               {triage.gcp_queries?.length > 0 && (
                 <div>
@@ -636,9 +715,17 @@ function IncidentDetail({ incidentId }) {
               {triage.classification === 'needs_human' && (
                 <>
                   <h4 className="text-red-400 font-medium mb-1">Human Review Required</h4>
-                  <p className="text-sm text-red-200/70">
+                  <p className="text-sm text-red-200/70 mb-2">
                     This issue is too complex for automated resolution. Manual investigation needed.
                   </p>
+                  {triage.runbook_reference && (
+                    <p className="text-xs text-red-200/60 mb-2">Runbook: {triage.runbook_reference}</p>
+                  )}
+                  {triage.manual_steps?.length > 0 && (
+                    <ol className="text-sm text-red-200/70 space-y-1 list-decimal list-inside">
+                      {triage.manual_steps.map((step, i) => <li key={i}>{step}</li>)}
+                    </ol>
+                  )}
                 </>
               )}
             </div>

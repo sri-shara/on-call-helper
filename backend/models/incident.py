@@ -112,6 +112,11 @@ class TriageResult(BaseModel):
     related_context: List[str] = Field(default_factory=list, description="Related patterns/warnings")
     gcp_context: Optional[Dict[str, Any]] = Field(None, description="Additional context fetched from GCP logs")
     gcp_queries: Optional[List[str]] = Field(None, description="GCP queries used during triage")
+
+    # Pre-analysis results from pattern matching and health checks
+    pre_analysis: Optional[Dict[str, Any]] = Field(None, description="Pre-analysis results (patterns, tenant, infra)")
+    tenant_type: Optional[str] = Field(None, description="Tenant type: production, demo, or unknown")
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
