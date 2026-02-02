@@ -45,10 +45,28 @@ async def lifespan(app: FastAPI):
     logger.info(f"Nucleus repo: {settings.nucleus_repo_path}")
     logger.info(f"On-Call repo: {settings.oncall_repo_path}")
 
+    # Auto-start GCP polling if enabled
+    if settings.gcp_auto_poll and settings.gcp_project_id:
+        logger.info(f"Auto-starting GCP polling (interval: {settings.gcp_poll_interval}s)")
+        try:
+            await _start_gcp_polling_internal(settings.gcp_poll_interval)
+            logger.info("GCP polling auto-started successfully")
+        except Exception as e:
+            logger.error(f"Failed to auto-start GCP polling: {e}")
+
     yield
 
     # Shutdown
     logger.info("Shutting down On Call Helper")
+
+    # Stop GCP polling if running
+    try:
+        gcp_service = get_gcp_service()
+        if gcp_service.is_polling:
+            await gcp_service.stop_polling()
+            logger.info("GCP polling stopped")
+    except Exception as e:
+        logger.error(f"Error stopping GCP polling: {e}")
 
     # Close WebSocket connections
     from backend.websocket_manager import ws_manager
@@ -627,14 +645,8 @@ def get_gcp_service():
     return _gcp_service
 
 
-@app.post("/gcp/polling/start", tags=["GCP"])
-async def start_gcp_polling(interval_seconds: int = 30):
-    """
-    Start polling GCP Cloud Logging for errors.
-
-    This requires read access to GCP Cloud Logging (Logging Viewer role).
-    Errors will be automatically processed through the incident pipeline.
-    """
+async def _start_gcp_polling_internal(interval_seconds: int = 30):
+    """Internal function to start GCP polling (used by both lifespan and endpoint)."""
     from backend.services.gcp_logging import GCPLoggingService, create_incident_from_log
     from backend.websocket_manager import ws_manager, create_pipeline_event_callback
     from backend.agents.orchestrator import PipelineOrchestrator
@@ -677,7 +689,7 @@ async def start_gcp_polling(interval_seconds: int = 30):
         callback = create_pipeline_event_callback()
         orchestrator = PipelineOrchestrator(
             event_callback=lambda e: asyncio.create_task(callback(e)),
-            skip_sandbox=True,  # TODO: Enable when Kind is installed
+            skip_sandbox=True,
             skip_verification=True,
         )
         try:
@@ -694,6 +706,17 @@ async def start_gcp_polling(interval_seconds: int = 30):
         "project_id": gcp_service.project_id,
         "filter": gcp_service.log_filter,
     }
+
+
+@app.post("/gcp/polling/start", tags=["GCP"])
+async def start_gcp_polling(interval_seconds: int = 30):
+    """
+    Start polling GCP Cloud Logging for errors.
+
+    This requires read access to GCP Cloud Logging (Logging Viewer role).
+    Errors will be automatically processed through the incident pipeline.
+    """
+    return await _start_gcp_polling_internal(interval_seconds)
 
 
 @app.post("/gcp/polling/stop", tags=["GCP"])
