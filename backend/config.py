@@ -80,6 +80,24 @@ class Settings(BaseSettings):
     # ═══════════════ Dashboard ═══════════════
     dashboard_url: str = Field("http://localhost:3000", description="Dashboard URL")
 
+    # ═══════════════ Pattern Learning ═══════════════
+    pattern_learning_enabled: bool = Field(
+        True,
+        description="Enable pattern learning from historical incidents"
+    )
+    pattern_min_occurrences: int = Field(
+        3,
+        description="Minimum occurrences before pattern can override classification"
+    )
+    pattern_override_success_rate: float = Field(
+        0.70,
+        description="Minimum success rate (0.0-1.0) for pattern to override classification"
+    )
+    pattern_override_confidence: float = Field(
+        0.80,
+        description="Minimum pattern confidence (0.0-1.0) for override"
+    )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -46,6 +46,7 @@ from backend.services.production_monitor import (
     ProductionMonitorError,
 )
 from backend.storage import storage
+from backend.knowledge import get_pattern_learner
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +192,16 @@ class PipelineOrchestrator:
         # Track active pipelines to prevent duplicate processing
         self._active_incidents: Dict[str, asyncio.Task] = {}
 
+        # Pattern learning (lazy initialized)
+        self._pattern_learner = None
+
+    @property
+    def pattern_learner(self):
+        """Get the pattern learner (lazy initialization)."""
+        if self._pattern_learner is None:
+            self._pattern_learner = get_pattern_learner(storage)
+        return self._pattern_learner
+
     def _emit_event(
         self,
         incident_id: str,
@@ -302,6 +313,21 @@ class PipelineOrchestrator:
 
         # Persist triage result to storage
         storage.save_triage_result(result)
+
+        # Record pattern for learning
+        try:
+            pattern_id = self.pattern_learner.record_incident(
+                incident_id=incident.id,
+                error_msg=incident.error_message,
+                service=incident.service_name,
+                classification=result.classification.value
+            )
+            # Store pattern_id on incident for later outcome recording
+            if pattern_id:
+                incident.error_signature = pattern_id
+                storage.save_incident(incident)
+        except Exception as e:
+            logger.warning(f"Pattern recording failed for {incident.id}: {e}")
 
         return result
 
@@ -643,6 +669,18 @@ class PipelineOrchestrator:
                 reason = self._get_escalation_reason_for_classification(triage_result.classification)
                 message = self._get_escalation_message_for_classification(triage_result)
 
+                # Record outcome for pattern learning
+                # TRANSIENT is a success - we correctly identified a self-healing error
+                if triage_result.classification == TriageClassification.TRANSIENT:
+                    try:
+                        self.pattern_learner.record_outcome(
+                            pattern_id=incident.error_signature,
+                            success=True,
+                            fix_details=None  # No fix needed for transient
+                        )
+                    except Exception as e:
+                        logger.warning(f"Pattern outcome recording failed: {e}")
+
                 await self._handle_escalation(
                     incident,
                     reason,
@@ -807,6 +845,22 @@ class PipelineOrchestrator:
 
                     # Persist verification result to storage
                     storage.save_verification_result(verification_result)
+
+                    # Record outcome for pattern learning
+                    if verification_result.status == VerificationStatus.SUCCESS:
+                        try:
+                            self.pattern_learner.record_outcome(
+                                pattern_id=incident.error_signature,
+                                success=True,
+                                fix_details={
+                                    "incident_id": incident.id,
+                                    "file_path": fix_result.file_path if fix_result else "unknown",
+                                    "fix_explanation": fix_result.explanation if fix_result else "",
+                                    "pr_url": pr_url,
+                                }
+                            )
+                        except Exception as e:
+                            logger.warning(f"Pattern outcome recording failed: {e}")
 
                     if verification_result.status == VerificationStatus.FAILED:
                         await self._handle_escalation(

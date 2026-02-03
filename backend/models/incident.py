@@ -126,6 +126,10 @@ class TriageResult(BaseModel):
     pre_analysis: Optional[Dict[str, Any]] = Field(None, description="Pre-analysis results (patterns, tenant, infra)")
     tenant_type: Optional[str] = Field(None, description="Tenant type: production, demo, or unknown")
 
+    # Pattern learning fields
+    pattern_suggestion: Optional[Dict[str, Any]] = Field(None, description="Historical pattern match suggestion")
+    override_reason: Optional[str] = Field(None, description="Reason if classification was overridden by pattern learning")
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -242,3 +246,67 @@ class Metrics(BaseModel):
     review_needed: int = Field(0, description="Requires human review")
     pr_raised: int = Field(0, description="PRs created for fixes")
     mttr_seconds: Optional[float] = Field(None, description="Mean time to resolution")
+
+
+# Pattern Learning models
+
+
+class FixRecord(BaseModel):
+    """Record of a successful fix for a pattern."""
+
+    incident_id: str = Field(..., description="Incident that was fixed")
+    file_path: str = Field(..., description="File that was fixed")
+    fix_explanation: str = Field(..., description="Explanation of the fix")
+    pr_url: Optional[str] = Field(None, description="PR URL if available")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class PatternRecord(BaseModel):
+    """A learned error pattern with historical outcomes."""
+
+    pattern_id: str = Field(..., description="MD5 signature from error_aggregator")
+    error_template: str = Field(..., description="Normalized error message (first 200 chars)")
+    service_name: str = Field(..., description="Service where pattern was observed")
+    classifications: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Count of each classification: {'fixable': 5, 'transient': 2}"
+    )
+    success_count: int = Field(0, description="Number of successful outcomes")
+    failure_count: int = Field(0, description="Number of failed outcomes")
+    first_seen: datetime = Field(default_factory=datetime.utcnow)
+    last_seen: datetime = Field(default_factory=datetime.utcnow)
+    successful_fixes: List[FixRecord] = Field(
+        default_factory=list,
+        description="Recent successful fixes (limited to 10)"
+    )
+
+    @property
+    def occurrence_count(self) -> int:
+        """Total number of times this pattern was observed."""
+        return sum(self.classifications.values())
+
+    @property
+    def most_common_classification(self) -> Optional[str]:
+        """Most frequently assigned classification."""
+        if not self.classifications:
+            return None
+        return max(self.classifications.keys(), key=lambda k: self.classifications[k])
+
+    @property
+    def success_rate(self) -> float:
+        """Success rate of outcomes (0.0 to 1.0)."""
+        total = self.success_count + self.failure_count
+        if total == 0:
+            return 0.0
+        return self.success_count / total
+
+
+class PatternSuggestion(BaseModel):
+    """Suggestion from pattern learning for a new incident."""
+
+    pattern_id: str = Field(..., description="ID of the matched pattern")
+    classification: str = Field(..., description="Suggested classification")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in suggestion")
+    occurrence_count: int = Field(..., description="How many times this pattern was seen")
+    success_rate: float = Field(..., ge=0.0, le=1.0, description="Historical success rate")
+    suggested_fix: Optional[FixRecord] = Field(None, description="Most recent successful fix")

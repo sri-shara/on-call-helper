@@ -462,6 +462,88 @@ async def get_triage_decisions(limit: int = 50):
     }
 
 
+# ═══════════════ Pattern Learning Endpoints ═══════════════
+
+
+@app.get("/patterns/stats", tags=["Pattern Learning"])
+async def get_pattern_stats():
+    """
+    Get statistics about learned error patterns.
+
+    Returns total patterns, occurrence counts, success rates,
+    and classification breakdown.
+    """
+    from backend.knowledge import get_pattern_learner
+
+    try:
+        pattern_learner = get_pattern_learner(storage)
+        return pattern_learner.get_statistics()
+    except Exception as e:
+        logger.error(f"Failed to get pattern stats: {e}")
+        return {
+            "total_patterns": 0,
+            "total_occurrences": 0,
+            "patterns_with_successful_fixes": 0,
+            "average_success_rate": 0,
+            "most_common_classification": None,
+            "patterns_by_classification": {},
+            "error": str(e),
+        }
+
+
+@app.get("/patterns/similar", tags=["Pattern Learning"])
+async def find_similar_patterns(error: str, service: Optional[str] = None):
+    """
+    Find historical patterns similar to the given error message.
+
+    Returns a suggestion if a matching pattern exists with enough
+    historical data to inform classification.
+    """
+    from backend.knowledge import get_pattern_learner
+
+    if not error:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "error parameter is required"}
+        )
+
+    try:
+        pattern_learner = get_pattern_learner(storage)
+        suggestion = pattern_learner.get_pattern_suggestion(
+            error_msg=error,
+            service=service or "unknown"
+        )
+
+        if suggestion:
+            return {
+                "found": True,
+                "suggestion": suggestion.model_dump(),
+            }
+        else:
+            return {
+                "found": False,
+                "message": "No matching pattern found",
+            }
+
+    except Exception as e:
+        logger.error(f"Failed to find similar patterns: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Pattern lookup failed: {str(e)}"}
+        )
+
+
+@app.get("/patterns/config", tags=["Pattern Learning"])
+async def get_pattern_config():
+    """Get current pattern learning configuration."""
+    return {
+        "enabled": settings.pattern_learning_enabled,
+        "min_occurrences": settings.pattern_min_occurrences,
+        "override_success_rate": settings.pattern_override_success_rate,
+        "override_confidence": settings.pattern_override_confidence,
+    }
+
+
 # ═══════════════ Webhook Endpoints ═══════════════
 
 

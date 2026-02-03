@@ -30,6 +30,8 @@ from backend.models import (
     Metrics,
     TriageClassification,
     Severity,
+    PatternRecord,
+    FixRecord,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,7 @@ class FirestoreStorage:
     VERIFICATION_RESULTS = "verification_results"
     SEEN_IDS = "seen_gcp_ids"
     METRICS = "metrics"
+    INCIDENT_PATTERNS = "incident_patterns"
 
     def __init__(self, project_id: Optional[str] = None):
         """
@@ -580,3 +583,196 @@ class FirestoreStorage:
         except Exception as e:
             logger.error(f"Failed to get recent errors summary: {e}")
             return {"total": 0, "hours": hours, "by_service": {}, "by_status": {}}
+
+    # ═══════════════ Pattern Learning ═══════════════
+
+    def _pattern_to_dict(self, pattern: PatternRecord) -> Dict[str, Any]:
+        """Convert PatternRecord to Firestore document."""
+        data = pattern.model_dump()
+        data["first_seen"] = pattern.first_seen
+        data["last_seen"] = pattern.last_seen
+        # Convert FixRecord list to dicts
+        data["successful_fixes"] = [
+            {
+                "incident_id": f.incident_id,
+                "file_path": f.file_path,
+                "fix_explanation": f.fix_explanation,
+                "pr_url": f.pr_url,
+                "created_at": f.created_at,
+            }
+            for f in pattern.successful_fixes
+        ]
+        return data
+
+    def _dict_to_pattern(self, data: Dict[str, Any]) -> PatternRecord:
+        """Convert Firestore document to PatternRecord."""
+        # Convert fix dicts back to FixRecord objects
+        if "successful_fixes" in data and data["successful_fixes"]:
+            data["successful_fixes"] = [
+                FixRecord(**f) for f in data["successful_fixes"]
+            ]
+        return PatternRecord(**data)
+
+    def save_pattern(self, pattern: PatternRecord) -> None:
+        """Save a pattern to Firestore."""
+        try:
+            doc_ref = self.db.collection(self.INCIDENT_PATTERNS).document(pattern.pattern_id)
+            doc_ref.set(self._pattern_to_dict(pattern))
+            logger.debug(f"Saved pattern {pattern.pattern_id}")
+        except Exception as e:
+            logger.error(f"Failed to save pattern {pattern.pattern_id}: {e}")
+            raise
+
+    def get_pattern(self, pattern_id: str) -> Optional[PatternRecord]:
+        """Get a pattern by ID from Firestore."""
+        try:
+            doc = self.db.collection(self.INCIDENT_PATTERNS).document(pattern_id).get()
+            if doc.exists:
+                return self._dict_to_pattern(doc.to_dict())
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get pattern {pattern_id}: {e}")
+            return None
+
+    def find_patterns_by_service(
+        self,
+        service_name: str,
+        limit: int = 50
+    ) -> List[PatternRecord]:
+        """Find patterns for a specific service."""
+        try:
+            query = (
+                self.db.collection(self.INCIDENT_PATTERNS)
+                .where(filter=FieldFilter("service_name", "==", service_name))
+                .order_by("last_seen", direction=firestore.Query.DESCENDING)
+                .limit(limit)
+            )
+
+            patterns = []
+            for doc in query.stream():
+                try:
+                    patterns.append(self._dict_to_pattern(doc.to_dict()))
+                except Exception as e:
+                    logger.warning(f"Failed to parse pattern {doc.id}: {e}")
+
+            return patterns
+        except Exception as e:
+            logger.error(f"Failed to find patterns by service: {e}")
+            return []
+
+    def update_pattern_outcome(
+        self,
+        pattern_id: str,
+        classification: str,
+        success: bool,
+        fix: Optional[FixRecord] = None
+    ) -> bool:
+        """
+        Update a pattern with a new outcome.
+
+        Args:
+            pattern_id: Pattern to update
+            classification: Classification that was assigned
+            success: Whether the outcome was successful
+            fix: Optional fix record to add to successful_fixes
+
+        Returns:
+            True if updated, False if pattern not found
+        """
+        try:
+            doc_ref = self.db.collection(self.INCIDENT_PATTERNS).document(pattern_id)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                return False
+
+            data = doc.to_dict()
+
+            # Update classification count
+            classifications = data.get("classifications", {})
+            classifications[classification] = classifications.get(classification, 0) + 1
+
+            # Update success/failure counts
+            if success:
+                success_count = data.get("success_count", 0) + 1
+                failure_count = data.get("failure_count", 0)
+            else:
+                success_count = data.get("success_count", 0)
+                failure_count = data.get("failure_count", 0) + 1
+
+            # Update timestamp
+            update_data = {
+                "classifications": classifications,
+                "success_count": success_count,
+                "failure_count": failure_count,
+                "last_seen": datetime.utcnow(),
+            }
+
+            # Add fix to successful_fixes if provided (limit to 10)
+            if fix and success:
+                fixes = data.get("successful_fixes", [])
+                fix_dict = {
+                    "incident_id": fix.incident_id,
+                    "file_path": fix.file_path,
+                    "fix_explanation": fix.fix_explanation,
+                    "pr_url": fix.pr_url,
+                    "created_at": fix.created_at,
+                }
+                fixes.insert(0, fix_dict)  # Add to front
+                fixes = fixes[:10]  # Keep only 10 most recent
+                update_data["successful_fixes"] = fixes
+
+            doc_ref.update(update_data)
+            logger.debug(f"Updated pattern outcome: {pattern_id} -> {classification} (success={success})")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to update pattern outcome: {e}")
+            return False
+
+    def get_pattern_stats(self) -> Dict[str, Any]:
+        """Get statistics about learned patterns."""
+        try:
+            patterns = list(self.db.collection(self.INCIDENT_PATTERNS).stream())
+
+            total_patterns = len(patterns)
+            total_occurrences = 0
+            patterns_with_fixes = 0
+            total_success = 0
+            total_outcomes = 0
+            by_classification = {}
+
+            for doc in patterns:
+                data = doc.to_dict()
+                classifications = data.get("classifications", {})
+
+                for cls, count in classifications.items():
+                    total_occurrences += count
+                    by_classification[cls] = by_classification.get(cls, 0) + count
+
+                if data.get("successful_fixes"):
+                    patterns_with_fixes += 1
+
+                success = data.get("success_count", 0)
+                failure = data.get("failure_count", 0)
+                total_success += success
+                total_outcomes += success + failure
+
+            return {
+                "total_patterns": total_patterns,
+                "total_occurrences": total_occurrences,
+                "patterns_with_successful_fixes": patterns_with_fixes,
+                "average_success_rate": total_success / total_outcomes if total_outcomes > 0 else 0,
+                "most_common_classification": max(by_classification.keys(), key=lambda k: by_classification[k]) if by_classification else None,
+                "patterns_by_classification": by_classification,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get pattern stats: {e}")
+            return {
+                "total_patterns": 0,
+                "total_occurrences": 0,
+                "patterns_with_successful_fixes": 0,
+                "average_success_rate": 0,
+                "most_common_classification": None,
+                "patterns_by_classification": {},
+            }
