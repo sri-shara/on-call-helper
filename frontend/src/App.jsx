@@ -763,6 +763,7 @@ function Dashboard() {
   const { incidents, isConnected, metrics } = useIncidents()
   const [selectedIncidentId, setSelectedIncidentId] = useState(null)
   const [filter, setFilter] = useState('all')
+  const [debugInfo, setDebugInfo] = useState({ apiError: null, lastFetch: null })
 
   const incidentList = useMemo(() => {
     let list = Object.values(incidents)
@@ -870,9 +871,28 @@ function Dashboard() {
           {/* List */}
           <div className="flex-1 overflow-y-auto">
             {incidentList.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-12 text-slate-500">
-                <p className="text-sm">No incidents</p>
+              <div className="flex flex-col items-center justify-center py-12 text-slate-500 px-4">
+                <p className="text-sm font-medium">No incidents to display</p>
                 <p className="text-xs text-slate-600 mt-1">Monitoring GCP logs...</p>
+                {/* Debug info */}
+                <div className="mt-6 p-4 bg-slate-800/50 rounded-lg text-xs text-left max-w-md w-full">
+                  <p className="font-semibold text-slate-400 mb-2">Debug Info:</p>
+                  <div className="space-y-1 text-slate-500">
+                    <p>• Incidents in state: <span className="text-slate-300">{Object.keys(incidents).length}</span></p>
+                    <p>• WebSocket: <span className={isConnected ? 'text-emerald-400' : 'text-red-400'}>{isConnected ? 'Connected' : 'Disconnected'}</span></p>
+                    <p>• Server metrics total: <span className="text-slate-300">{metrics.total_incidents}</span></p>
+                    <p>• Current filter: <span className="text-slate-300">{filter}</span></p>
+                  </div>
+                  <div className="mt-4 pt-4 border-t border-slate-700">
+                    <p className="text-slate-400 mb-2">To test:</p>
+                    <code className="block text-xs bg-slate-900 p-2 rounded break-all">
+                      curl -X POST http://localhost:8000/webhook/test \<br/>
+                      &nbsp;&nbsp;-H "Content-Type: application/json" \<br/>
+                      &nbsp;&nbsp;-d '{"{"}error_message": "Test error", "service_name": "test-service"{"}"}'
+                    </code>
+                  </div>
+                  <p className="mt-4 text-slate-600 text-[10px]">Check browser console (F12) for detailed logs</p>
+                </div>
               </div>
             ) : (
               <div className="divide-y divide-slate-800/50">

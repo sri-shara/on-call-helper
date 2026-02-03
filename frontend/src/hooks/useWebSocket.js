@@ -34,6 +34,11 @@ export function useWebSocket(url, options = {}) {
       return
     }
 
+    // Don't attempt connection if we've exceeded max retries
+    if (retriesRef.current >= maxRetries) {
+      return
+    }
+
     try {
       const ws = new WebSocket(url)
       wsRef.current = ws
@@ -43,6 +48,10 @@ export function useWebSocket(url, options = {}) {
         setIsConnected(true)
         setConnectionError(null)
         retriesRef.current = 0
+        // Clear error flag on successful connection
+        if (wsRef.current) {
+          wsRef.current._errorLogged = false
+        }
 
         // Start ping interval
         pingIntervalRef.current = setInterval(() => {
@@ -85,21 +94,29 @@ export function useWebSocket(url, options = {}) {
         }
 
         // Attempt reconnect if not a clean close
+        // Use exponential backoff to avoid spamming when backend is down
         if (event.code !== 1000 && retriesRef.current < maxRetries) {
           retriesRef.current++
-          console.log(`Reconnecting... attempt ${retriesRef.current}/${maxRetries}`)
+          const backoffDelay = Math.min(reconnectInterval * Math.pow(2, retriesRef.current - 1), 30000)
+          console.log(`Reconnecting... attempt ${retriesRef.current}/${maxRetries} (waiting ${backoffDelay}ms)`)
 
           reconnectTimeoutRef.current = setTimeout(() => {
             connect()
-          }, reconnectInterval)
+          }, backoffDelay)
         } else if (retriesRef.current >= maxRetries) {
-          setConnectionError('Max reconnection attempts reached')
+          setConnectionError('Max reconnection attempts reached - backend may be down')
+          console.warn('WebSocket: Stopped reconnecting. Backend may not be running.')
         }
       }
 
       ws.onerror = (error) => {
-        console.error('WebSocket error:', error)
-        setConnectionError('Connection error')
+        // Don't spam console with connection errors when backend is down
+        // Only log if we haven't seen this error recently
+        if (!wsRef.current?._errorLogged) {
+          console.warn('WebSocket connection error (backend may be down)')
+          wsRef.current._errorLogged = true
+        }
+        setConnectionError('Connection error - backend may be down')
       }
 
     } catch (error) {
@@ -127,6 +144,14 @@ export function useWebSocket(url, options = {}) {
     retriesRef.current = maxRetries // Prevent auto-reconnect
     setIsConnected(false)
   }, [maxRetries])
+
+  const reconnect = useCallback(() => {
+    // Reset retry counter and attempt reconnection
+    retriesRef.current = 0
+    setConnectionError(null)
+    disconnect()
+    setTimeout(() => connect(), 1000)
+  }, [connect, disconnect])
 
   const send = useCallback((data) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -163,6 +188,7 @@ export function useWebSocket(url, options = {}) {
     unsubscribe,
     connect,
     disconnect,
+    reconnect,
   }
 }
 
