@@ -58,6 +58,11 @@ from .runbooks import (
     get_investigation_steps,
 )
 
+from .pattern_learner import (
+    PatternLearner,
+    get_pattern_learner,
+)
+
 __all__ = [
     # Loader
     "load_sre_knowledge",
@@ -97,4 +102,7 @@ __all__ = [
     "get_runbook_suggester",
     "suggest_runbook",
     "get_investigation_steps",
+    # Pattern Learning
+    "PatternLearner",
+    "get_pattern_learner",
 ]

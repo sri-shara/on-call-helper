@@ -299,47 +299,28 @@ export function IncidentProvider({ children }) {
   // Fetch initial incidents
   const fetchIncidents = useCallback(async () => {
     try {
-      console.log('Fetching incidents from /api/incidents...')
       const response = await fetch('/api/incidents')
-      console.log('Response status:', response.status)
       if (response.ok) {
         const data = await response.json()
-        console.log('Received incidents data:', data)
-        console.log('Number of incidents:', data.incidents?.length || 0)
         if (data.incidents && data.incidents.length > 0) {
-          console.log('Processing', data.incidents.length, 'incidents...')
-          data.incidents.forEach((incident, index) => {
-            const payload = {
-              id: incident.id,
-              title: incident.title,
-              service: incident.service_name || incident.service || 'unknown',
-              severity: incident.severity,
-              status: incident.status,
-              createdAt: incident.created_at,
-              // Include triage classification for consistent badge display
-              triage: incident.triage_classification
-                ? { classification: incident.triage_classification }
-                : undefined,
-              // Include occurrence count for aggregated incidents
-              occurrenceCount: incident.occurrence_count || 1,
-            }
-            console.log(`Dispatching incident ${index + 1}/${data.incidents.length}:`, payload.id, payload.title)
+          data.incidents.forEach((incident) => {
             dispatch({
               type: ActionTypes.ADD_INCIDENT,
-              payload,
+              payload: {
+                id: incident.id,
+                title: incident.title,
+                service: incident.service_name || incident.service || 'unknown',
+                severity: incident.severity,
+                status: incident.status,
+                createdAt: incident.created_at,
+                triage: incident.triage_classification
+                  ? { classification: incident.triage_classification }
+                  : undefined,
+                occurrenceCount: incident.occurrence_count || 1,
+              },
             })
           })
-          console.log('✅ Dispatched', data.incidents.length, 'incidents to state')
-          // Verify they were added
-          setTimeout(() => {
-            console.log('State after dispatch - incidents count:', Object.keys(incidents).length)
-          }, 100)
-        } else {
-          console.log('⚠️ No incidents found in response. Response data:', data)
         }
-      } else {
-        const errorText = await response.text()
-        console.error('Failed to fetch incidents - response not OK:', response.status, errorText)
       }
     } catch (error) {
       console.error('Failed to fetch incidents:', error)

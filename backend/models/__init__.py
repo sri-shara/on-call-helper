@@ -12,6 +12,10 @@ from .incident import (
     VerificationResult,
     WebSocketEvent,
     Metrics,
+    # Pattern Learning models
+    FixRecord,
+    PatternRecord,
+    PatternSuggestion,
 )
 
 __all__ = [
@@ -28,4 +32,8 @@ __all__ = [
     "VerificationResult",
     "WebSocketEvent",
     "Metrics",
+    # Pattern Learning models
+    "FixRecord",
+    "PatternRecord",
+    "PatternSuggestion",
 ]

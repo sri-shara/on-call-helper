@@ -43,6 +43,8 @@ from backend.knowledge import (
     # Runbooks
     suggest_runbook,
     get_investigation_steps,
+    # Pattern learning
+    get_pattern_learner,
 )
 from backend.models import (
     Incident,
@@ -81,9 +83,17 @@ class TriageAgent:
         self.client: Optional[AIClient] = None
         self._system_prompt: Optional[str] = None
         self._gcp_client = None
+        self._pattern_learner = None  # Lazy initialized
 
         # Create client using factory (handles Anthropic vs Vertex AI)
         self.client = create_ai_client(api_key=api_key)
+
+    @property
+    def pattern_learner(self):
+        """Get the pattern learner (lazy initialization)."""
+        if self._pattern_learner is None:
+            self._pattern_learner = get_pattern_learner()
+        return self._pattern_learner
 
     async def _pre_analyze(self, incident: Incident) -> Dict[str, Any]:
         """
@@ -190,6 +200,21 @@ class TriageAgent:
             incident.error_message,
             pre_analysis.get("pattern_classification", "NEEDS_HUMAN")
         )
+
+        # 6. Historical pattern lookup (Pattern Learning)
+        try:
+            pattern_suggestion = self.pattern_learner.get_pattern_suggestion(
+                error_msg=incident.error_message,
+                service=incident.service_name
+            )
+            if pattern_suggestion and pattern_suggestion.occurrence_count >= 3:
+                pre_analysis["pattern_suggestion"] = pattern_suggestion.model_dump()
+                logger.info(
+                    f"Historical pattern found for {incident.id}: {pattern_suggestion.classification} "
+                    f"({pattern_suggestion.occurrence_count} occurrences, {pattern_suggestion.success_rate:.0%} success)"
+                )
+        except Exception as e:
+            logger.warning(f"Pattern lookup failed for {incident.id}: {e}")
 
         return pre_analysis
 
@@ -446,10 +471,24 @@ class TriageAgent:
                 if rb.get("section"):
                     parts.append(f"- Specific Section: {rb['section']}")
 
+            # Historical pattern learning
+            if pre_analysis.get("pattern_suggestion"):
+                ps = pre_analysis["pattern_suggestion"]
+                parts.extend([
+                    "",
+                    f"**Historical Pattern Match**:",
+                    f"- Found {ps['occurrence_count']} similar incidents in history",
+                    f"- Most common classification: **{ps['classification'].upper()}**",
+                    f"- Historical success rate: {ps['success_rate']:.0%}",
+                ])
+                if ps.get("suggested_fix"):
+                    parts.append(f"- Previous fix approach: {ps['suggested_fix'].get('fix_explanation', 'N/A')}")
+
             parts.extend([
                 "",
                 "**IMPORTANT**: Use the pre-analysis above to inform your classification.",
                 "If a known pattern was matched, weight that heavily in your decision.",
+                "If historical patterns show consistent classification, consider that strongly.",
                 "If infrastructure issues were detected, consider INFRA_ISSUE classification.",
             ])
 
@@ -732,6 +771,44 @@ class TriageAgent:
                         f"Applied pattern confidence boost for {incident.id}: "
                         f"{original_confidence:.2f} -> {result.confidence:.2f}"
                     )
+
+                # Apply historical pattern learning confidence boost
+                if pre_analysis.get("pattern_suggestion"):
+                    ps = pre_analysis["pattern_suggestion"]
+                    if ps["classification"].lower() == result.classification.value:
+                        # Pattern agrees with Claude - boost confidence
+                        boost = 0.15 if ps["success_rate"] >= 0.7 else 0.10
+                        original_confidence = result.confidence
+                        result.confidence = min(0.95, result.confidence + boost)
+                        logger.info(
+                            f"Historical pattern confidence boost for {incident.id}: "
+                            f"+{boost:.2f} ({original_confidence:.2f} -> {result.confidence:.2f})"
+                        )
+
+                    # Check if we should override Claude's classification
+                    should_override = (
+                        settings.pattern_learning_enabled and
+                        ps["occurrence_count"] >= settings.pattern_min_occurrences and
+                        ps["success_rate"] >= settings.pattern_override_success_rate and
+                        ps["confidence"] >= settings.pattern_override_confidence and
+                        ps["classification"].lower() != result.classification.value
+                    )
+
+                    if should_override:
+                        original = result.classification.value
+                        result.classification = TriageClassification(ps["classification"].lower())
+                        result.confidence = min(0.95, ps["success_rate"])
+                        result.override_reason = (
+                            f"Overridden from {original.upper()} based on {ps['occurrence_count']} "
+                            f"similar historical incidents ({ps['success_rate']:.0%} success rate)"
+                        )
+                        logger.warning(
+                            f"Pattern override for {incident.id}: {original} -> {ps['classification']} "
+                            f"({ps['occurrence_count']} occurrences, {ps['success_rate']:.0%} success)"
+                        )
+
+                    # Store pattern suggestion in result
+                    result.pattern_suggestion = ps
 
                 # Override classification if infra issue detected and Claude didn't catch it
                 if pre_analysis.get("is_infra_issue") and result.classification != TriageClassification.INFRA_ISSUE:
