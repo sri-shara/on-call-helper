@@ -116,6 +116,38 @@ function timeAgo(date) {
 }
 
 /**
+ * Extract short service name from full service path
+ */
+function shortServiceName(service) {
+  if (!service) return 'Unknown'
+  // Handle URLs like "alloydb.googleapis.com" -> "alloydb"
+  if (service.includes('.googleapis.com')) {
+    return service.split('.')[0]
+  }
+  // Handle paths like "nucleus-worker" -> "nucleus-worker"
+  if (service.includes('/')) {
+    return service.split('/').pop()
+  }
+  return service
+}
+
+/**
+ * Clean up incident title for display
+ */
+function cleanTitle(title, service) {
+  if (!title) return 'No description'
+  let cleaned = title
+  // Remove service name prefix like "[alloydb.googleapis.com]"
+  if (service) {
+    cleaned = cleaned.replace(new RegExp(`^\\[${service.replace('.', '\\.')}\\]\\s*`, 'i'), '')
+  }
+  // Remove timestamp prefixes like "2026-02-03 02:32:40.463 UTC"
+  cleaned = cleaned.replace(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\d.]*\s*(UTC)?\s*/i, '')
+  // Trim and return
+  return cleaned.trim() || title
+}
+
+/**
  * Section header component
  */
 function SectionHeader({ children }) {
@@ -132,43 +164,46 @@ function SectionHeader({ children }) {
 function IncidentListItem({ incident, isSelected, onClick }) {
   // Get classification from triage or escalation data
   const classification = incident.triage?.classification || incident.escalation?.classification
+  const serviceName = shortServiceName(incident.service)
+  const title = cleanTitle(incident.title, incident.service)
 
   return (
     <div
       onClick={onClick}
-      className={`group px-4 py-3 cursor-pointer transition-all border-l-2 ${
+      className={`group px-3 py-2.5 cursor-pointer transition-all border-l-2 ${
         isSelected
           ? 'bg-slate-800/80 border-l-blue-500'
           : 'border-l-transparent hover:bg-slate-800/40 hover:border-l-slate-600'
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <SeverityDot severity={incident.severity} />
-            <span className="text-sm font-medium text-slate-200 truncate">
-              {incident.service || 'Unknown Service'}
+      {/* Top row: Service name + Status badge */}
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <div className="flex items-center gap-2 min-w-0">
+          <SeverityDot severity={incident.severity} />
+          <span className="text-sm font-medium text-slate-200 truncate">
+            {serviceName}
+          </span>
+          {incident.occurrenceCount > 1 && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-medium flex-shrink-0">
+              ×{incident.occurrenceCount}
             </span>
-          </div>
-          <p className="text-xs text-slate-400 truncate mb-2 pl-4">
-            {incident.title}
-          </p>
-          <div className="flex items-center gap-2 pl-4">
-            <span className="text-[10px] text-slate-600 font-mono">{incident.id}</span>
-            <span className="text-[10px] text-slate-600">·</span>
-            <span className="text-[10px] text-slate-500">{timeAgo(incident.createdAt)}</span>
-            {incident.occurrenceCount > 1 && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-medium">
-                ×{incident.occurrenceCount}
-              </span>
-            )}
-          </div>
+          )}
         </div>
         <StatusBadge
           status={incident.status}
           classification={classification}
           size="sm"
         />
+      </div>
+      {/* Error message preview */}
+      <p className="text-xs text-slate-400 truncate mb-1.5 ml-4">
+        {title}
+      </p>
+      {/* Metadata row */}
+      <div className="flex items-center gap-1.5 ml-4 text-[10px] text-slate-600">
+        <span className="font-mono">{incident.id?.slice(0, 12)}</span>
+        <span>·</span>
+        <span className="text-slate-500">{timeAgo(incident.createdAt)}</span>
       </div>
     </div>
   )
@@ -377,8 +412,9 @@ function IncidentDetail({ incidentId }) {
             <p className="text-xs text-slate-500 font-mono mt-0.5">{incident.id}</p>
           </div>
           <div className="flex items-center gap-3 flex-shrink-0">
-            {/* Resolve button - show for all non-fixed incidents */}
-            {incident.status !== 'fixed' && (
+            {/* Resolve button - only show for needs_human or infra_issue that need manual resolution */}
+            {incident.status !== 'fixed' &&
+             (triage?.classification === 'needs_human' || triage?.classification === 'infra_issue') && (
               <button
                 onClick={handleResolve}
                 disabled={resolving}
@@ -740,19 +776,25 @@ function IncidentDetail({ incidentId }) {
 /**
  * Header metrics
  */
-function MetricPill({ label, value, color }) {
+function MetricPill({ label, value, color, isActive, onClick }) {
   const colors = {
     default: 'text-slate-400',
     green: 'text-emerald-400',
     amber: 'text-amber-400',
     blue: 'text-blue-400',
     red: 'text-red-400',
+    slate: 'text-slate-400',
   }
   return (
-    <div className="flex items-center gap-1.5">
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors ${
+        isActive ? 'bg-slate-800' : 'hover:bg-slate-800/50'
+      }`}
+    >
       <span className={`font-semibold tabular-nums ${colors[color] || colors.default}`}>{value}</span>
       <span className="text-slate-500 text-xs">{label}</span>
-    </div>
+    </button>
   )
 }
 
@@ -773,20 +815,23 @@ function Dashboard() {
         const classification = inc.triage?.classification || inc.escalation?.classification
         const status = inc.status
 
-        if (filter === 'fixed') {
-          return status === 'fixed' || status === 'pr_created'
-        }
         if (filter === 'processing') {
           return ['active', 'triaging', 'fixing', 'testing', 'reviewing', 'verifying'].includes(status)
         }
-        if (filter === 'escalated') {
-          // Review = escalated OR (needs human attention AND not yet fixed)
+        if (filter === 'no-action') {
+          // No Action = transient (self-healing)
+          return classification === 'transient'
+        }
+        if (filter === 'review') {
+          // Review = needs_human or infra_issue (exclude transient/self-healing)
+          if (classification === 'transient') return false
           const needsReview = classification === 'needs_human' || classification === 'infra_issue'
           const notFixed = status !== 'fixed' && status !== 'pr_created'
           return status === 'escalated' || (needsReview && notFixed)
         }
-        if (filter === 'self-healing') {
-          return classification === 'transient'
+        if (filter === 'pr-raised') {
+          // PR Raised = fixed or pr_created
+          return status === 'fixed' || status === 'pr_created'
         }
         return true
       })
@@ -821,17 +866,17 @@ function Dashboard() {
             </div>
           </div>
 
-          <div className="flex items-center gap-6">
-            <div className="flex items-center gap-4 text-sm">
-              <MetricPill label="Total" value={metrics.total_incidents} />
-              <MetricPill label="Processing" value={metrics.processing} color="blue" />
-              <MetricPill label="No Action" value={metrics.no_action_needed} color="slate" />
-              <MetricPill label="Review" value={metrics.review_needed} color="amber" />
-              <MetricPill label="PR Raised" value={metrics.pr_raised} color="green" />
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-1 text-sm">
+              <MetricPill label="Total" value={metrics.total_incidents} isActive={filter === 'all'} onClick={() => setFilter('all')} />
+              <MetricPill label="Active" value={metrics.processing} color="blue" isActive={filter === 'processing'} onClick={() => setFilter('processing')} />
+              <MetricPill label="No Action" value={metrics.no_action_needed} color="slate" isActive={filter === 'no-action'} onClick={() => setFilter('no-action')} />
+              <MetricPill label="Review" value={metrics.review_needed} color="amber" isActive={filter === 'review'} onClick={() => setFilter('review')} />
+              <MetricPill label="Fixed" value={metrics.pr_raised} color="green" isActive={filter === 'pr-raised'} onClick={() => setFilter('pr-raised')} />
             </div>
 
-            <div className="flex items-center gap-2 pl-4 border-l border-slate-800">
-              <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-red-500'}`} />
+            <div className="flex items-center gap-2 pl-3 border-l border-slate-800">
+              <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
               <span className="text-xs text-slate-500">
                 {isConnected ? 'Live' : 'Offline'}
               </span>
@@ -843,20 +888,21 @@ function Dashboard() {
       {/* Content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Sidebar */}
-        <div className="w-80 border-r border-slate-800 flex flex-col bg-slate-900/50">
+        <div className="w-96 border-r border-slate-800 flex flex-col bg-slate-900/50">
           {/* Filter tabs */}
-          <div className="px-4 py-3 border-b border-slate-800">
-            <div className="flex items-center gap-1 p-1 bg-slate-800/50 rounded-lg">
+          <div className="px-3 py-2 border-b border-slate-800">
+            <div className="flex items-center gap-0.5 p-0.5 bg-slate-800/50 rounded-lg">
               {[
                 { id: 'all', label: 'All' },
                 { id: 'processing', label: 'Active' },
-                { id: 'fixed', label: 'Fixed' },
-                { id: 'escalated', label: 'Review' },
+                { id: 'no-action', label: 'No Action' },
+                { id: 'review', label: 'Review' },
+                { id: 'pr-raised', label: 'Fixed' },
               ].map(tab => (
                 <button
                   key={tab.id}
                   onClick={() => setFilter(tab.id)}
-                  className={`flex-1 px-2 py-1 text-xs font-medium rounded-md transition-colors ${
+                  className={`flex-1 px-2 py-1.5 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap ${
                     filter === tab.id
                       ? 'bg-slate-700 text-slate-200'
                       : 'text-slate-500 hover:text-slate-300'

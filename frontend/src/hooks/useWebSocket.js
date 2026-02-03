@@ -17,7 +17,7 @@ export function useWebSocket(url, options = {}) {
     onConnect,
     onDisconnect,
     reconnectInterval = 3000,
-    maxRetries = 10,
+    maxRetries = Infinity, // Never give up reconnecting
   } = options
 
   const [isConnected, setIsConnected] = useState(false)
@@ -34,8 +34,8 @@ export function useWebSocket(url, options = {}) {
       return
     }
 
-    // Don't attempt connection if we've exceeded max retries
-    if (retriesRef.current >= maxRetries) {
+    // Don't attempt connection if we've exceeded max retries (skip if infinite)
+    if (maxRetries !== Infinity && retriesRef.current >= maxRetries) {
       return
     }
 
@@ -44,7 +44,6 @@ export function useWebSocket(url, options = {}) {
       wsRef.current = ws
 
       ws.onopen = () => {
-        console.log('WebSocket connected')
         setIsConnected(true)
         setConnectionError(null)
         retriesRef.current = 0
@@ -79,7 +78,6 @@ export function useWebSocket(url, options = {}) {
       }
 
       ws.onclose = (event) => {
-        console.log('WebSocket disconnected:', event.code, event.reason)
         setIsConnected(false)
         wsRef.current = null
 
@@ -95,15 +93,17 @@ export function useWebSocket(url, options = {}) {
 
         // Attempt reconnect if not a clean close
         // Use exponential backoff to avoid spamming when backend is down
-        if (event.code !== 1000 && retriesRef.current < maxRetries) {
+        const shouldRetry = maxRetries === Infinity || retriesRef.current < maxRetries
+        if (event.code !== 1000 && shouldRetry) {
           retriesRef.current++
-          const backoffDelay = Math.min(reconnectInterval * Math.pow(2, retriesRef.current - 1), 30000)
-          console.log(`Reconnecting... attempt ${retriesRef.current}/${maxRetries} (waiting ${backoffDelay}ms)`)
+          // Cap backoff at 30 seconds
+          const backoffDelay = Math.min(reconnectInterval * Math.pow(1.5, Math.min(retriesRef.current - 1, 10)), 30000)
+          console.log(`WebSocket reconnecting... attempt ${retriesRef.current} (waiting ${Math.round(backoffDelay/1000)}s)`)
 
           reconnectTimeoutRef.current = setTimeout(() => {
             connect()
           }, backoffDelay)
-        } else if (retriesRef.current >= maxRetries) {
+        } else if (maxRetries !== Infinity && retriesRef.current >= maxRetries) {
           setConnectionError('Max reconnection attempts reached - backend may be down')
           console.warn('WebSocket: Stopped reconnecting. Backend may not be running.')
         }
@@ -125,7 +125,7 @@ export function useWebSocket(url, options = {}) {
     }
   }, [url, onMessage, onConnect, onDisconnect, reconnectInterval, maxRetries])
 
-  const disconnect = useCallback(() => {
+  const disconnect = useCallback((preventReconnect = true) => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current)
       reconnectTimeoutRef.current = null
@@ -137,11 +137,17 @@ export function useWebSocket(url, options = {}) {
     }
 
     if (wsRef.current) {
-      wsRef.current.close(1000, 'User disconnect')
+      // Only close if the connection is actually open
+      // Don't close if still connecting (StrictMode compatibility)
+      if (wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close(1000, 'User disconnect')
+      }
       wsRef.current = null
     }
 
-    retriesRef.current = maxRetries // Prevent auto-reconnect
+    if (preventReconnect && maxRetries !== Infinity) {
+      retriesRef.current = maxRetries // Prevent auto-reconnect
+    }
     setIsConnected(false)
   }, [maxRetries])
 
@@ -172,10 +178,11 @@ export function useWebSocket(url, options = {}) {
 
   // Connect on mount
   useEffect(() => {
+    retriesRef.current = 0
     connect()
 
     return () => {
-      disconnect()
+      disconnect(false)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
