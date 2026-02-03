@@ -234,7 +234,19 @@ class TriageAgent:
             start_time = error_time - timedelta(hours=1)
             end_time = error_time + timedelta(minutes=5)
 
-            time_filter = f'timestamp>="{start_time.isoformat()}Z" AND timestamp<="{end_time.isoformat()}Z"'
+            # Format timestamps for GCP Cloud Logging (RFC3339 format)
+            # Ensure UTC timezone and format correctly
+            from datetime import timezone
+            if start_time.tzinfo is None:
+                start_time = start_time.replace(tzinfo=timezone.utc)
+            if end_time.tzinfo is None:
+                end_time = end_time.replace(tzinfo=timezone.utc)
+            
+            # Format as RFC3339 - use isoformat() and replace +00:00 with Z
+            start_str = start_time.isoformat().replace('+00:00', 'Z')
+            end_str = end_time.isoformat().replace('+00:00', 'Z')
+            
+            time_filter = f'timestamp>="{start_str}" AND timestamp<="{end_str}"'
 
             # 1. Get related errors from same service
             if incident.service_name and incident.service_name != "unknown":
@@ -694,9 +706,10 @@ class TriageAgent:
                 logger.warning(f"Failed to fetch GCP context for {incident.id}: {e}")
                 # Continue without context - don't block triage
 
-        # 3. Call Claude for analysis
+        # 3. Call Claude for analysis (run in thread pool to avoid blocking event loop)
         try:
-            message = self.client.messages.create(
+            message = await asyncio.to_thread(
+                self.client.messages.create,
                 model=self.model,
                 max_tokens=4096,
                 system=self.system_prompt,

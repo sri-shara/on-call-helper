@@ -693,7 +693,7 @@ def get_gcp_service():
 async def _start_gcp_polling_internal(interval_seconds: int = 30):
     """Internal function to start GCP polling (used by both lifespan and endpoint)."""
     from backend.services.gcp_logging import GCPLoggingService, create_incident_from_log
-    from backend.websocket_manager import ws_manager, create_pipeline_event_callback
+    from backend.websocket_manager import ws_manager, create_pipeline_event_callback, EventType
     from backend.agents.orchestrator import PipelineOrchestrator
     import asyncio
 
@@ -747,13 +747,13 @@ async def _start_gcp_polling_internal(interval_seconds: int = 30):
             storage.increment_incident_count(existing_incident_id, new_count)
             logger.info(f"Aggregated into {existing_incident_id} (count: {new_count})")
             # Broadcast count update
-            await ws_manager.broadcast({
-                "type": "incident_updated",
-                "data": {
+            await ws_manager.broadcast(
+                EventType.INCIDENT_UPDATED,
+                {
                     "incident_id": existing_incident_id,
                     "occurrence_count": new_count,
                 }
-            })
+            )
             return
 
         # 4. Apply tenant filter

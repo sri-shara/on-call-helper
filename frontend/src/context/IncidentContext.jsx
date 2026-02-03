@@ -282,7 +282,7 @@ export function IncidentProvider({ children }) {
   // Determine WebSocket URL
   const wsUrl = typeof window !== 'undefined'
     ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`
-    : 'ws://localhost:8001/ws'
+    : 'ws://localhost:8000/ws'
 
   // WebSocket connection
   const {
@@ -299,16 +299,20 @@ export function IncidentProvider({ children }) {
   // Fetch initial incidents
   const fetchIncidents = useCallback(async () => {
     try {
+      console.log('Fetching incidents from /api/incidents...')
       const response = await fetch('/api/incidents')
+      console.log('Response status:', response.status)
       if (response.ok) {
         const data = await response.json()
-        data.incidents?.forEach(incident => {
-          dispatch({
-            type: ActionTypes.ADD_INCIDENT,
-            payload: {
+        console.log('Received incidents data:', data)
+        console.log('Number of incidents:', data.incidents?.length || 0)
+        if (data.incidents && data.incidents.length > 0) {
+          console.log('Processing', data.incidents.length, 'incidents...')
+          data.incidents.forEach((incident, index) => {
+            const payload = {
               id: incident.id,
               title: incident.title,
-              service: incident.service_name,
+              service: incident.service_name || incident.service || 'unknown',
               severity: incident.severity,
               status: incident.status,
               createdAt: incident.created_at,
@@ -318,21 +322,41 @@ export function IncidentProvider({ children }) {
                 : undefined,
               // Include occurrence count for aggregated incidents
               occurrenceCount: incident.occurrence_count || 1,
-            },
+            }
+            console.log(`Dispatching incident ${index + 1}/${data.incidents.length}:`, payload.id, payload.title)
+            dispatch({
+              type: ActionTypes.ADD_INCIDENT,
+              payload,
+            })
           })
-        })
+          console.log('✅ Dispatched', data.incidents.length, 'incidents to state')
+          // Verify they were added
+          setTimeout(() => {
+            console.log('State after dispatch - incidents count:', Object.keys(incidents).length)
+          }, 100)
+        } else {
+          console.log('⚠️ No incidents found in response. Response data:', data)
+        }
+      } else {
+        const errorText = await response.text()
+        console.error('Failed to fetch incidents - response not OK:', response.status, errorText)
       }
     } catch (error) {
       console.error('Failed to fetch incidents:', error)
     }
   }, [])
 
-  // Fetch incidents on mount and when connected
+  // Fetch incidents on mount
+  useEffect(() => {
+    fetchIncidents()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  
+  // Also fetch when WebSocket connects to get latest updates
   useEffect(() => {
     if (isConnected) {
       fetchIncidents()
     }
-  }, [isConnected, fetchIncidents])
+  }, [isConnected]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Update an incident in the local state
   const updateIncident = useCallback((id, updates) => {
