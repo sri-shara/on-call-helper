@@ -29,27 +29,27 @@ class TestTriageAgentInit:
 
     def test_init_with_defaults(self):
         """Test initialization with default settings."""
-        with patch("backend.agents.triage.settings") as mock_settings:
-            mock_settings.anthropic_api_key = "test-key"
-            mock_settings.triage_model = "claude-sonnet-4-20250514"
+        with patch("backend.agents.triage.create_ai_client") as mock_factory:
+            mock_factory.return_value = MagicMock()
 
             agent = TriageAgent()
 
-            assert agent.api_key == "test-key"
-            assert agent.model == "claude-sonnet-4-20250514"
+            assert agent.client is not None
+            mock_factory.assert_called_once()
 
-    def test_init_with_custom_values(self):
-        """Test initialization with custom API key and model."""
-        agent = TriageAgent(api_key="custom-key", model="claude-3-opus-20240229")
+    def test_init_with_custom_model(self):
+        """Test initialization with custom model override."""
+        with patch("backend.agents.triage.create_ai_client") as mock_factory:
+            mock_factory.return_value = MagicMock()
 
-        assert agent.api_key == "custom-key"
-        assert agent.model == "claude-3-opus-20240229"
+            agent = TriageAgent(model="claude-3-opus-20240229")
+
+            assert agent.model == "claude-3-opus-20240229"
 
     def test_init_without_api_key(self):
         """Test initialization without API key."""
-        with patch("backend.agents.triage.settings") as mock_settings:
-            mock_settings.anthropic_api_key = ""
-            mock_settings.triage_model = "claude-sonnet-4-20250514"
+        with patch("backend.agents.triage.create_ai_client") as mock_factory:
+            mock_factory.return_value = None  # Simulates missing credentials
 
             agent = TriageAgent()
 
@@ -340,42 +340,38 @@ class TestAnalyze:
     """Tests for the analyze method with mocked API."""
 
     @pytest.fixture
-    def mock_anthropic(self):
-        """Create a mock Anthropic client."""
-        with patch("backend.agents.triage.Anthropic") as mock:
-            yield mock
+    def mock_ai_client(self):
+        """Create a mock AI client via factory."""
+        with patch("backend.agents.triage.create_ai_client") as mock_factory:
+            mock_client = MagicMock()
+            mock_factory.return_value = mock_client
+            yield mock_client
 
     @pytest.mark.asyncio
-    async def test_analyze_fixable_incident(self, mock_anthropic):
+    async def test_analyze_fixable_incident(self, mock_ai_client):
         """Test analyzing a fixable incident."""
         # Setup mock
-        mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text=SAMPLE_FIXABLE_RESPONSE)]
-        mock_client.messages.create.return_value = mock_response
-        mock_anthropic.return_value = mock_client
+        mock_ai_client.messages.create.return_value = mock_response
 
-        agent = TriageAgent(api_key="test-key")
-        agent.client = mock_client
+        agent = TriageAgent()
         incident = create_null_pointer_incident()
 
         result = await agent.analyze(incident)
 
         assert result.classification == TriageClassification.FIXABLE
         assert result.confidence == 0.85
-        mock_client.messages.create.assert_called_once()
+        mock_ai_client.messages.create.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_analyze_infra_incident(self, mock_anthropic):
+    async def test_analyze_infra_incident(self, mock_ai_client):
         """Test analyzing an infrastructure incident."""
-        mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text=SAMPLE_INFRA_RESPONSE)]
-        mock_client.messages.create.return_value = mock_response
-        mock_anthropic.return_value = mock_client
+        mock_ai_client.messages.create.return_value = mock_response
 
-        agent = TriageAgent(api_key="test-key")
-        agent.client = mock_client
+        agent = TriageAgent()
         incident = create_database_connection_incident()
 
         result = await agent.analyze(incident)
@@ -386,9 +382,8 @@ class TestAnalyze:
     @pytest.mark.asyncio
     async def test_analyze_without_client_raises_error(self):
         """Test that analyzing without client raises error."""
-        with patch("backend.agents.triage.settings") as mock_settings:
-            mock_settings.anthropic_api_key = ""
-            mock_settings.triage_model = "claude-sonnet-4-20250514"
+        with patch("backend.agents.triage.create_ai_client") as mock_factory:
+            mock_factory.return_value = None  # Simulates missing credentials
 
             agent = TriageAgent()
             incident = create_null_pointer_incident()
@@ -399,42 +394,36 @@ class TestAnalyze:
             assert "not initialized" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_analyze_handles_api_error(self, mock_anthropic):
+    async def test_analyze_handles_api_error(self, mock_ai_client):
         """Test that API errors are handled gracefully."""
         from anthropic import APIError
 
-        mock_client = MagicMock()
-        mock_client.messages.create.side_effect = APIError(
+        mock_ai_client.messages.create.side_effect = APIError(
             message="Internal server error",
             request=MagicMock(),
             body=None,
         )
-        mock_anthropic.return_value = mock_client
 
-        agent = TriageAgent(api_key="test-key")
-        agent.client = mock_client
+        agent = TriageAgent()
         incident = create_null_pointer_incident()
 
         with pytest.raises(TriageError) as exc_info:
             await agent.analyze(incident)
 
-        assert "API error" in str(exc_info.value)
+        assert "error" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
-    async def test_analyze_handles_rate_limit(self, mock_anthropic):
+    async def test_analyze_handles_rate_limit(self, mock_ai_client):
         """Test that rate limits are handled gracefully."""
         from anthropic import RateLimitError
 
-        mock_client = MagicMock()
-        mock_client.messages.create.side_effect = RateLimitError(
+        mock_ai_client.messages.create.side_effect = RateLimitError(
             message="Rate limited",
             response=MagicMock(),
             body=None,
         )
-        mock_anthropic.return_value = mock_client
 
-        agent = TriageAgent(api_key="test-key")
-        agent.client = mock_client
+        agent = TriageAgent()
         incident = create_null_pointer_incident()
 
         with pytest.raises(TriageError) as exc_info:

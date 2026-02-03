@@ -13,7 +13,17 @@ services:
     environment:
       - DEBUG=${DEBUG:-false}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # AI - Anthropic Direct (default)
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - TRIAGE_MODEL=${TRIAGE_MODEL:-claude-sonnet-4-20250514}
+      - FIXER_MODEL=${FIXER_MODEL:-claude-sonnet-4-20250514}
+      # AI - Vertex AI (alternative)
+      - USE_VERTEX=${USE_VERTEX:-false}
+      - VERTEX_PROJECT_ID=${VERTEX_PROJECT_ID:-}
+      - VERTEX_REGION=${VERTEX_REGION:-us-east5}
+      - VERTEX_TRIAGE_MODEL=${VERTEX_TRIAGE_MODEL:-claude-sonnet-4-5@20250929}
+      - VERTEX_FIXER_MODEL=${VERTEX_FIXER_MODEL:-claude-sonnet-4-5@20250929}
+      # GCP
       - GCP_PROJECT_ID=${GCP_PROJECT_ID}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_REPO=${GITHUB_REPO}

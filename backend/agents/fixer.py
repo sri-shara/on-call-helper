@@ -11,8 +11,9 @@ import logging
 import re
 from typing import Any, Dict, Optional
 
-from anthropic import Anthropic, APIError, APIConnectionError, RateLimitError
+from anthropic import APIError, APIConnectionError, RateLimitError
 
+from backend.ai_client import create_ai_client, get_fixer_model, get_backend_name, AIClient
 from backend.config import settings
 from backend.models import TriageResult, FixResult, TriageClassification
 from backend.services.github import GitHubService, GitHubError
@@ -88,16 +89,15 @@ class FixerAgent:
 
         Args:
             github_service: GitHub service for reading source files
-            api_key: Anthropic API key (defaults to settings)
-            model: Model to use (defaults to settings.fixer_model)
+            api_key: Anthropic API key override (ignored for Vertex AI)
+            model: Model override (defaults to backend-specific model)
         """
-        self.api_key = api_key or settings.anthropic_api_key
-        self.model = model or settings.fixer_model
-        self.client: Optional[Anthropic] = None
+        self.model = model  # Allow override, otherwise use backend-specific default
+        self.client: Optional[AIClient] = None
         self.github = github_service
 
-        if self.api_key:
-            self.client = Anthropic(api_key=self.api_key)
+        # Create client using factory (handles Anthropic vs Vertex AI)
+        self.client = create_ai_client(api_key=api_key)
 
     def _format_triage(self, triage: TriageResult, source_code: str) -> str:
         """Format triage result and source code for Claude."""
@@ -336,7 +336,7 @@ Please generate an improved fix that addresses these issues.
             FixerError: If fix generation fails
         """
         if not self.client:
-            raise FixerError("Anthropic client not initialized. Check ANTHROPIC_API_KEY.")
+            raise FixerError(f"AI client not initialized. Backend: {get_backend_name()}. Check configuration.")
 
         if triage.classification != TriageClassification.FIXABLE:
             raise FixerError(
@@ -371,7 +371,7 @@ Please generate an improved fix that addresses these issues.
             # Run in thread pool to avoid blocking the event loop
             message = await asyncio.to_thread(
                 self.client.messages.create,
-                model=self.model,
+                model=self.model or get_fixer_model(),
                 max_tokens=4096,
                 system=FIXER_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}],
@@ -398,13 +398,13 @@ Please generate an improved fix that addresses these issues.
 
         except APIConnectionError as e:
             logger.error(f"API connection error generating fix: {e}")
-            raise FixerError(f"Failed to connect to Anthropic API: {e}")
+            raise FixerError(f"Failed to connect to {get_backend_name()}: {e}")
         except RateLimitError as e:
             logger.error(f"Rate limited generating fix: {e}")
-            raise FixerError(f"Rate limited by Anthropic API: {e}")
+            raise FixerError(f"Rate limited by {get_backend_name()}: {e}")
         except APIError as e:
             logger.error(f"API error generating fix: {e}")
-            raise FixerError(f"Anthropic API error: {e}")
+            raise FixerError(f"{get_backend_name()} error: {e}")
 
     async def _fetch_source_code(self, file_path: str) -> str:
         """

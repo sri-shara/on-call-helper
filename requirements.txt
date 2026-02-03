@@ -10,7 +10,7 @@ pydantic>=2.5.0
 pydantic-settings>=2.1.0
 
 # ═══════════════ AI ═══════════════
-anthropic>=0.18.0
+anthropic[vertex]>=0.18.0
 
 # ═══════════════ HTTP Client ═══════════════
 httpx>=0.26.0

@@ -19,9 +19,10 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from anthropic import Anthropic, APIError, APIConnectionError, RateLimitError
+from anthropic import APIError, APIConnectionError, RateLimitError
 from pydantic import ValidationError
 
+from backend.ai_client import create_ai_client, get_triage_model, get_backend_name, AIClient
 from backend.config import settings
 from backend.knowledge import (
     get_triage_system_prompt,
@@ -73,18 +74,16 @@ class TriageAgent:
         Initialize the triage agent.
 
         Args:
-            api_key: Anthropic API key (defaults to settings)
-            model: Model to use (defaults to settings.triage_model)
+            api_key: Anthropic API key override (ignored for Vertex AI)
+            model: Model override (defaults to backend-specific model)
         """
-        self.api_key = api_key or settings.anthropic_api_key
-        self.model = model or settings.triage_model
-        self.client: Optional[Anthropic] = None
+        self.model = model  # Allow override, otherwise use backend-specific default
+        self.client: Optional[AIClient] = None
         self._system_prompt: Optional[str] = None
         self._gcp_client = None
 
-        # Lazy initialize client when needed
-        if self.api_key:
-            self.client = Anthropic(api_key=self.api_key)
+        # Create client using factory (handles Anthropic vs Vertex AI)
+        self.client = create_ai_client(api_key=api_key)
 
     async def _pre_analyze(self, incident: Incident) -> Dict[str, Any]:
         """
@@ -678,7 +677,7 @@ class TriageAgent:
             TriageError: If analysis fails
         """
         if not self.client:
-            raise TriageError("Anthropic client not initialized. Check ANTHROPIC_API_KEY.")
+            raise TriageError(f"AI client not initialized. Backend: {get_backend_name()}. Check configuration.")
 
         logger.info(f"Triaging incident {incident.id}: {incident.title}")
 
@@ -710,7 +709,7 @@ class TriageAgent:
         try:
             message = await asyncio.to_thread(
                 self.client.messages.create,
-                model=self.model,
+                model=self.model or get_triage_model(),
                 max_tokens=4096,
                 system=self.system_prompt,
                 messages=[
@@ -778,13 +777,13 @@ class TriageAgent:
 
         except APIConnectionError as e:
             logger.error(f"API connection error triaging {incident.id}: {e}")
-            raise TriageError(f"Failed to connect to Anthropic API: {e}")
+            raise TriageError(f"Failed to connect to {get_backend_name()}: {e}")
         except RateLimitError as e:
             logger.error(f"Rate limited triaging {incident.id}: {e}")
-            raise TriageError(f"Rate limited by Anthropic API: {e}")
+            raise TriageError(f"Rate limited by {get_backend_name()}: {e}")
         except APIError as e:
             logger.error(f"API error triaging {incident.id}: {e}")
-            raise TriageError(f"Anthropic API error: {e}")
+            raise TriageError(f"{get_backend_name()} error: {e}")
         except Exception as e:
             logger.error(f"Unexpected error triaging {incident.id}: {e}")
             raise TriageError(f"Triage failed: {e}")

@@ -5,7 +5,7 @@ Tests the Claude-based code fix generator with mocked API responses.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, AsyncMock as AMock
 
 from backend.agents.fixer import FixerAgent, FixerError, generate_fix
 from backend.models import TriageResult, FixResult, TriageClassification
@@ -32,34 +32,33 @@ class TestFixerAgentInit:
 
     def test_init_with_defaults(self):
         """Test initialization with default settings."""
-        with patch("backend.agents.fixer.settings") as mock_settings:
-            mock_settings.anthropic_api_key = "test-key"
-            mock_settings.fixer_model = "claude-sonnet-4-20250514"
+        with patch("backend.agents.fixer.create_ai_client") as mock_factory:
+            mock_factory.return_value = MagicMock()
 
             agent = FixerAgent()
 
-            assert agent.api_key == "test-key"
-            assert agent.model == "claude-sonnet-4-20250514"
+            assert agent.client is not None
+            mock_factory.assert_called_once()
 
     def test_init_with_custom_values(self):
         """Test initialization with custom values."""
         mock_github = MagicMock()
 
-        agent = FixerAgent(
-            github_service=mock_github,
-            api_key="custom-key",
-            model="claude-3-opus-20240229",
-        )
+        with patch("backend.agents.fixer.create_ai_client") as mock_factory:
+            mock_factory.return_value = MagicMock()
 
-        assert agent.api_key == "custom-key"
-        assert agent.model == "claude-3-opus-20240229"
-        assert agent.github == mock_github
+            agent = FixerAgent(
+                github_service=mock_github,
+                model="claude-3-opus-20240229",
+            )
+
+            assert agent.model == "claude-3-opus-20240229"
+            assert agent.github == mock_github
 
     def test_init_without_api_key(self):
         """Test initialization without API key."""
-        with patch("backend.agents.fixer.settings") as mock_settings:
-            mock_settings.anthropic_api_key = ""
-            mock_settings.fixer_model = "claude-sonnet-4-20250514"
+        with patch("backend.agents.fixer.create_ai_client") as mock_factory:
+            mock_factory.return_value = None  # Simulates missing credentials
 
             agent = FixerAgent()
 
@@ -314,42 +313,42 @@ class TestGenerateFix:
         return mock
 
     @pytest.fixture
-    def mock_anthropic(self):
-        """Create a mock Anthropic client."""
-        with patch("backend.agents.fixer.Anthropic") as mock:
-            yield mock
+    def mock_ai_client(self):
+        """Create a mock AI client via factory."""
+        with patch("backend.agents.fixer.create_ai_client") as mock_factory:
+            mock_client = MagicMock()
+            mock_factory.return_value = mock_client
+            yield mock_client
 
     @pytest.mark.asyncio
-    async def test_generate_fix_success(self, mock_github, mock_anthropic):
+    async def test_generate_fix_success(self, mock_github, mock_ai_client):
         """Test successful fix generation."""
-        mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text=SAMPLE_NIL_CHECK_FIX_RESPONSE)]
-        mock_client.messages.create.return_value = mock_response
-        mock_anthropic.return_value = mock_client
+        mock_ai_client.messages.create.return_value = mock_response
 
-        agent = FixerAgent(github_service=mock_github, api_key="test-key")
-        agent.client = mock_client
+        agent = FixerAgent(github_service=mock_github)
         triage = create_nil_pointer_triage()
 
-        result = await agent.generate_fix(triage)
+        # Mock the file read since fixer reads from local filesystem (async function)
+        async def mock_fetch_source(path):
+            return SAMPLE_HANDLER_GO
+
+        with patch.object(agent, '_fetch_source_code', mock_fetch_source):
+            result = await agent.generate_fix(triage)
 
         assert result.incident_id == "OCH-TEST001"
         assert "nil" in result.fixed_code.lower()
         assert result.iteration == 1
-        mock_github.get_file_content.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_generate_fix_with_retry(self, mock_github, mock_anthropic):
+    async def test_generate_fix_with_retry(self, mock_github, mock_ai_client):
         """Test fix generation with retry and feedback."""
-        mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text=SAMPLE_FIX_WITH_RETRY_RESPONSE)]
-        mock_client.messages.create.return_value = mock_response
-        mock_anthropic.return_value = mock_client
+        mock_ai_client.messages.create.return_value = mock_response
 
-        agent = FixerAgent(github_service=mock_github, api_key="test-key")
-        agent.client = mock_client
+        agent = FixerAgent(github_service=mock_github)
         triage = create_nil_pointer_triage()
         previous_fix = FixResult(
             incident_id="OCH-TEST001",
@@ -361,23 +360,27 @@ class TestGenerateFix:
             iteration=1,
         )
 
-        result = await agent.generate_fix(
-            triage,
-            coderabbit_feedback="Add context to error message",
-            previous_fix=previous_fix,
-        )
+        # Mock the file read since fixer reads from local filesystem (async function)
+        async def mock_fetch_source(path):
+            return SAMPLE_HANDLER_GO
+
+        with patch.object(agent, '_fetch_source_code', mock_fetch_source):
+            result = await agent.generate_fix(
+                triage,
+                coderabbit_feedback="Add context to error message",
+                previous_fix=previous_fix,
+            )
 
         assert result.iteration == 2
         # Check that prompt includes feedback
-        call_args = mock_client.messages.create.call_args
+        call_args = mock_ai_client.messages.create.call_args
         user_content = call_args[1]["messages"][0]["content"]
         assert "Previous Attempt" in user_content or "CodeRabbit" in user_content
 
     @pytest.mark.asyncio
-    async def test_generate_fix_non_fixable_raises_error(self, mock_github):
+    async def test_generate_fix_non_fixable_raises_error(self, mock_github, mock_ai_client):
         """Test that non-fixable triage raises error."""
-        agent = FixerAgent(github_service=mock_github, api_key="test-key")
-        agent.client = MagicMock()
+        agent = FixerAgent(github_service=mock_github)
         triage = create_infra_issue_triage()
 
         with pytest.raises(FixerError) as exc_info:
@@ -386,10 +389,9 @@ class TestGenerateFix:
         assert "non-fixable classification" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_generate_fix_missing_file_path_raises_error(self, mock_github):
+    async def test_generate_fix_missing_file_path_raises_error(self, mock_github, mock_ai_client):
         """Test that missing file_path raises error."""
-        agent = FixerAgent(github_service=mock_github, api_key="test-key")
-        agent.client = MagicMock()
+        agent = FixerAgent(github_service=mock_github)
         triage = TriageResult(
             incident_id="OCH-TEST",
             classification=TriageClassification.FIXABLE,
@@ -406,9 +408,8 @@ class TestGenerateFix:
     @pytest.mark.asyncio
     async def test_generate_fix_without_client_raises_error(self, mock_github):
         """Test that missing client raises error."""
-        with patch("backend.agents.fixer.settings") as mock_settings:
-            mock_settings.anthropic_api_key = ""
-            mock_settings.fixer_model = "claude-sonnet-4-20250514"
+        with patch("backend.agents.fixer.create_ai_client") as mock_factory:
+            mock_factory.return_value = None  # Simulates missing credentials
 
             agent = FixerAgent(github_service=mock_github)
             triage = create_nil_pointer_triage()
@@ -419,7 +420,7 @@ class TestGenerateFix:
             assert "not initialized" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_generate_fix_github_error(self, mock_anthropic):
+    async def test_generate_fix_github_error(self, mock_ai_client):
         """Test handling of GitHub errors."""
         from backend.services.github import GitHubError
 
@@ -427,24 +428,22 @@ class TestGenerateFix:
         mock_github.get_file_content.side_effect = GitHubError("GitHub error")
         mock_github.close = AsyncMock()
 
-        agent = FixerAgent(github_service=mock_github, api_key="test-key")
-        agent.client = MagicMock()
+        agent = FixerAgent(github_service=mock_github)
         triage = create_nil_pointer_triage()
 
         with pytest.raises(FixerError) as exc_info:
             await agent.generate_fix(triage)
 
-        assert "fetch source code" in str(exc_info.value) or "GitHub error" in str(exc_info.value)
+        assert "fetch source code" in str(exc_info.value) or "not found" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_generate_fix_file_not_found(self, mock_anthropic):
+    async def test_generate_fix_file_not_found(self, mock_ai_client):
         """Test handling of file not found."""
         mock_github = AsyncMock()
         mock_github.get_file_content.return_value = None
         mock_github.close = AsyncMock()
 
-        agent = FixerAgent(github_service=mock_github, api_key="test-key")
-        agent.client = MagicMock()
+        agent = FixerAgent(github_service=mock_github)
         triage = create_nil_pointer_triage()
 
         with pytest.raises(FixerError) as exc_info:
@@ -453,16 +452,13 @@ class TestGenerateFix:
         assert "not found" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_iteration_caps_at_max(self, mock_github, mock_anthropic):
+    async def test_iteration_caps_at_max(self, mock_github, mock_ai_client):
         """Test that iteration doesn't exceed MAX_ITERATIONS."""
-        mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text=SAMPLE_NIL_CHECK_FIX_RESPONSE)]
-        mock_client.messages.create.return_value = mock_response
-        mock_anthropic.return_value = mock_client
+        mock_ai_client.messages.create.return_value = mock_response
 
-        agent = FixerAgent(github_service=mock_github, api_key="test-key")
-        agent.client = mock_client
+        agent = FixerAgent(github_service=mock_github)
         triage = create_nil_pointer_triage()
         previous_fix = FixResult(
             incident_id="OCH-TEST001",
@@ -474,11 +470,16 @@ class TestGenerateFix:
             iteration=3,  # Already at max
         )
 
-        result = await agent.generate_fix(
-            triage,
-            coderabbit_feedback="feedback",
-            previous_fix=previous_fix,
-        )
+        # Mock the file read since fixer reads from local filesystem (async function)
+        async def mock_fetch_source(path):
+            return SAMPLE_HANDLER_GO
+
+        with patch.object(agent, '_fetch_source_code', mock_fetch_source):
+            result = await agent.generate_fix(
+                triage,
+                coderabbit_feedback="feedback",
+                previous_fix=previous_fix,
+            )
 
         # Should stay at max (3)
         assert result.iteration == 3

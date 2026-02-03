@@ -25,10 +25,17 @@ class Settings(BaseSettings):
     host: str = Field("0.0.0.0", description="Server host")
     port: int = Field(8000, description="Server port")
 
-    # ═══════════════ AI ═══════════════
+    # ═══════════════ AI - Anthropic Direct (default) ═══════════════
     anthropic_api_key: str = Field("", description="Anthropic API key")
     triage_model: str = Field("claude-sonnet-4-20250514", description="Model for triage")
     fixer_model: str = Field("claude-sonnet-4-20250514", description="Model for fix generation")
+
+    # ═══════════════ AI - Vertex AI (alternative) ═══════════════
+    use_vertex: bool = Field(False, description="Use Vertex AI instead of Anthropic API")
+    vertex_project_id: str = Field("", description="GCP project for Vertex AI (e.g., anthropic-vertex)")
+    vertex_region: str = Field("us-east5", description="Vertex AI region")
+    vertex_triage_model: str = Field("claude-sonnet-4-5@20250929", description="Vertex model for triage")
+    vertex_fixer_model: str = Field("claude-sonnet-4-5@20250929", description="Vertex model for fix generation")
 
     # ═══════════════ GCP ═══════════════
     gcp_project_id: str = Field("", description="GCP project ID")
@@ -89,8 +96,14 @@ class Settings(BaseSettings):
         """Check required settings for production mode."""
         missing = []
 
-        if not self.anthropic_api_key:
-            missing.append("ANTHROPIC_API_KEY")
+        # AI backend validation - either Anthropic API key or Vertex AI project
+        if self.use_vertex:
+            if not self.vertex_project_id:
+                missing.append("VERTEX_PROJECT_ID (required for Vertex AI)")
+        else:
+            if not self.anthropic_api_key:
+                missing.append("ANTHROPIC_API_KEY")
+
         if not self.gcp_project_id:
             missing.append("GCP_PROJECT_ID")
         if not self.github_token:
