@@ -218,38 +218,83 @@ class RunbookSuggester:
             List of manual steps
         """
         steps = []
+        gcloud_commands = []
         error_lower = error_message.lower()
 
         # Database-related steps
-        if any(term in error_lower for term in ["alloydb", "database", "sql", "lock", "deadlock"]):
+        if any(term in error_lower for term in ["alloydb", "database", "sql", "lock", "deadlock", "wait_count"]):
             steps.extend([
-                "Check AlloyDB wait_count metric for lock contention",
-                "Review connection count - approaching 100 indicates exhaustion",
-                "Identify slow or blocking queries in Cloud Logging",
+                "Check AlloyDB wait_count metric for lock contention (>2000 = critical)",
+                "Review connection count — approaching 100 indicates exhaustion risk",
+                "Identify blocking queries and terminate if needed",
+                "If lock contention persists, pause entity processing subscriptions",
+            ])
+            gcloud_commands.extend([
+                "gcloud monitoring time-series list --project=nucleus-449303 --filter='metric.type=\"alloydb.googleapis.com/instance/postgresql/wait_count\"' --interval-start-time=$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)",
+                "SELECT pid, state, query_start, query FROM pg_stat_activity WHERE state != 'idle' ORDER BY query_start",
+                "SELECT pid, pg_blocking_pids(pid) AS blocked_by, query FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0",
+                "SELECT count(*) FROM pg_stat_activity",
             ])
 
         # Pub/Sub-related steps
-        if any(term in error_lower for term in ["pubsub", "backlog", "subscription", "message"]):
+        if any(term in error_lower for term in ["pubsub", "backlog", "subscription", "unacked"]):
             steps.extend([
-                "Check Pub/Sub backlog age for affected subscriptions",
-                "Verify consumer service is healthy (not OOMing)",
-                "Check for poison pill messages stuck in queue",
+                "Check Pub/Sub backlog age for affected subscriptions (>15min = warning, >12h = critical)",
+                "Verify consumer service is healthy — check for OOM kills or crash loops",
+                "If backlog critical, pause the subscription then investigate",
+                "Check for poison pill messages stuck in queue via snapshot inspection",
+            ])
+            gcloud_commands.extend([
+                "gcloud monitoring time-series list --project=nucleus-449303 --filter='metric.type=\"pubsub.googleapis.com/subscription/oldest_unacked_message_age\"'",
+                "gcloud pubsub subscriptions list --project=nucleus-449303 --filter='labels.env=prod'",
+                "gcloud pubsub subscriptions modify-push-config SUBSCRIPTION_NAME --project=nucleus-449303 --push-endpoint=''",
             ])
 
-        # Cross-service steps
-        if any(term in error_lower for term in ["timeout", "deadline", "connection"]):
+        # Cloud Run / service availability steps
+        if any(term in error_lower for term in ["cloud run", "5xx", "503", "revision", "oom", "memory"]):
             steps.extend([
-                "Check if error is isolated to one tenant or widespread",
+                "Check recent Cloud Run revisions for bad deploys",
+                "Review error logs for the affected service",
+                "If bad deploy identified, rollback to previous revision",
+            ])
+            gcloud_commands.extend([
+                "gcloud run revisions list --service=nucleusapp-prod --project=nucleus-449303 --limit=5",
+                "gcloud logging read 'resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"SERVICE_NAME\" AND severity>=ERROR' --project=nucleus-449303 --limit=50",
+                "gcloud run services update-traffic nucleusapp-prod --to-revisions=PREVIOUS_REVISION=100 --project=nucleus-449303",
+            ])
+
+        # Cross-service / timeout steps
+        if any(term in error_lower for term in ["timeout", "deadline", "connection reset", "connection refused"]):
+            steps.extend([
+                "Check if error is isolated to one tenant or widespread across multiple",
                 "Verify downstream services are healthy",
-                "Check recent deployments that may have introduced issues",
+                "Check recent deployments that may have introduced timeout issues",
+            ])
+            gcloud_commands.extend([
+                "gcloud logging read 'severity>=ERROR AND timestamp>=\"$(date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)\"' --project=nucleus-449303 --limit=100 --format='table(timestamp,resource.labels.service_name,textPayload)'",
             ])
 
         # Entity processing steps
-        if any(term in error_lower for term in ["entity", "enricher", "extractor"]):
+        if any(term in error_lower for term in ["entity", "enricher", "extractor", "upsert"]):
             steps.extend([
-                "Check entity processing subscription status",
-                "Monitor wait_count metric - >2000 requires pause",
-                "Consider pausing entity subscriptions if lock contention persists",
+                "Check entity processing subscription status and backlog",
+                "Monitor wait_count metric — >2000 requires immediate pause of entity subscriptions",
+                "Consider pausing entity subscriptions to relieve lock contention, then re-enable in phases",
+            ])
+            gcloud_commands.extend([
+                "gcloud monitoring time-series list --project=nucleus-449303 --filter='metric.type=\"alloydb.googleapis.com/instance/postgresql/wait_count\" AND metric.labels.wait_event_type=\"Lock\"'",
+                "gcloud pubsub subscriptions modify-push-config prod-entity-sub-TENANT_ID --project=nucleus-449303 --push-endpoint=''",
+            ])
+
+        # Integration-related steps
+        if any(term in error_lower for term in ["cisco", "amp", "secops", "soar", "chronicle", "integration"]):
+            steps.extend([
+                "Check integration service health and recent error patterns",
+                "Verify external API availability (Cisco AMP, SecOps, SOAR)",
+                "Check if the issue is tenant-specific or affecting all integrations",
+            ])
+            gcloud_commands.extend([
+                "gcloud logging read 'resource.type=\"cloud_run_revision\" AND textPayload=~\"integration\" AND severity>=ERROR' --project=nucleus-449303 --limit=50",
             ])
 
         # Default steps if nothing specific matched
@@ -260,8 +305,35 @@ class RunbookSuggester:
                 "Review recent deployments for related changes",
                 "Check infrastructure dashboards for anomalies",
             ]
+            gcloud_commands = [
+                "gcloud logging read 'severity>=ERROR AND timestamp>=\"$(date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)\"' --project=nucleus-449303 --limit=50",
+            ]
 
+        # Append commands to steps so they're available even without gcloud_commands field
+        self._last_gcloud_commands = gcloud_commands
         return steps
+
+    def get_gcloud_commands(
+        self,
+        error_message: str,
+        classification: str
+    ) -> List[str]:
+        """
+        Get gcloud/SQL commands for an error. Call after get_manual_steps().
+
+        Returns:
+            List of copy-paste-ready commands
+        """
+        # If get_manual_steps was just called, return cached commands
+        if hasattr(self, '_last_gcloud_commands') and self._last_gcloud_commands:
+            commands = self._last_gcloud_commands
+            self._last_gcloud_commands = []
+            return commands
+        # Fallback: re-derive
+        self.get_manual_steps(error_message, classification)
+        commands = self._last_gcloud_commands if hasattr(self, '_last_gcloud_commands') else []
+        self._last_gcloud_commands = []
+        return commands
 
 
 # Global instance
@@ -308,3 +380,21 @@ def get_investigation_steps(
         List of investigation steps
     """
     return get_runbook_suggester().get_manual_steps(error_message, classification)
+
+
+def get_diagnostic_commands(
+    error_message: str,
+    classification: str
+) -> List[str]:
+    """
+    Convenience function to get gcloud/SQL diagnostic commands.
+    Must be called after get_investigation_steps() for the same error.
+
+    Args:
+        error_message: The error message
+        classification: The triage classification
+
+    Returns:
+        List of copy-paste-ready gcloud/SQL commands
+    """
+    return get_runbook_suggester().get_gcloud_commands(error_message, classification)

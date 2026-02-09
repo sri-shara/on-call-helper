@@ -254,6 +254,7 @@ class WebSocketManager:
         title: str,
         service: str,
         severity: str,
+        source: str = "gcp",
     ) -> int:
         """Broadcast incident created event."""
         return await self.broadcast(
@@ -263,6 +264,7 @@ class WebSocketManager:
                 "title": title,
                 "service": service,
                 "severity": severity,
+                "source": source,
             },
         )
 
@@ -513,6 +515,19 @@ def create_pipeline_event_callback():
         }
 
         event_type = stage_to_event.get(event.stage, EventType.INCIDENT_UPDATED)
+
+        # Detect completion events for stages that emit twice (started + complete)
+        # by checking for completion-specific data keys
+        if event.stage == PipelineStage.TRIAGING and "classification" in event.data:
+            event_type = EventType.TRIAGE_COMPLETE
+        elif event.stage == PipelineStage.FIXING and "file_path" in event.data:
+            event_type = EventType.FIX_GENERATED
+        elif event.stage == PipelineStage.REVIEWING and "passed" in event.data:
+            event_type = EventType.REVIEW_COMPLETE
+        elif event.stage == PipelineStage.TESTING and "tests_run" in event.data:
+            event_type = EventType.SANDBOX_COMPLETE
+        elif event.stage == PipelineStage.VERIFYING and "status" in event.data:
+            event_type = EventType.VERIFICATION_COMPLETE
 
         await ws_manager.broadcast(
             event_type,

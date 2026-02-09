@@ -44,7 +44,7 @@ class FirestoreStorage:
     Provides persistent storage for incidents and all pipeline results.
     """
 
-    # Collection names
+    # Collection names (GCP — default)
     INCIDENTS = "incidents"
     TRIAGE_RESULTS = "triage_results"
     FIX_RESULTS = "fix_results"
@@ -53,6 +53,26 @@ class FirestoreStorage:
     SEEN_IDS = "seen_gcp_ids"
     METRICS = "metrics"
     INCIDENT_PATTERNS = "incident_patterns"
+
+    # GChat collection names (separate from GCP to avoid cross-contamination)
+    GCHAT_INCIDENTS = "gchat_incidents"
+    GCHAT_TRIAGE_RESULTS = "gchat_triage_results"
+    GCHAT_FIX_RESULTS = "gchat_fix_results"
+    GCHAT_TEST_RESULTS = "gchat_test_results"
+    GCHAT_VERIFICATION_RESULTS = "gchat_verification_results"
+
+    def _col(self, base: str, source: Optional[str] = None) -> str:
+        """Return the correct collection name based on source."""
+        if source == "gchat":
+            mapping = {
+                self.INCIDENTS: self.GCHAT_INCIDENTS,
+                self.TRIAGE_RESULTS: self.GCHAT_TRIAGE_RESULTS,
+                self.FIX_RESULTS: self.GCHAT_FIX_RESULTS,
+                self.TEST_RESULTS: self.GCHAT_TEST_RESULTS,
+                self.VERIFICATION_RESULTS: self.GCHAT_VERIFICATION_RESULTS,
+            }
+            return mapping.get(base, base)
+        return base
 
     def __init__(self, project_id: Optional[str] = None):
         """
@@ -171,9 +191,10 @@ class FirestoreStorage:
     # ═══════════════ Incidents ═══════════════
 
     def save_incident(self, incident: Incident) -> None:
-        """Save an incident to Firestore."""
+        """Save an incident to Firestore (routes to gchat collection if source=gchat)."""
         try:
-            doc_ref = self.db.collection(self.INCIDENTS).document(incident.id)
+            col = self._col(self.INCIDENTS, incident.source)
+            doc_ref = self.db.collection(col).document(incident.id)
             doc_ref.set(self._incident_to_dict(incident))
 
             # Track GCP insert ID for deduplication
@@ -184,15 +205,19 @@ class FirestoreStorage:
                     "created_at": datetime.utcnow(),
                 })
 
-            logger.debug(f"Saved incident {incident.id} to Firestore")
+            logger.debug(f"Saved incident {incident.id} to Firestore ({col})")
         except Exception as e:
             logger.error(f"Failed to save incident {incident.id}: {e}")
             raise
 
     def get_incident(self, incident_id: str) -> Optional[Incident]:
-        """Get an incident by ID from Firestore."""
+        """Get an incident by ID from Firestore (checks both GCP and GChat collections)."""
         try:
             doc = self.db.collection(self.INCIDENTS).document(incident_id).get()
+            if doc.exists:
+                return self._dict_to_incident(doc.to_dict())
+            # Fall through to check gchat collection
+            doc = self.db.collection(self.GCHAT_INCIDENTS).document(incident_id).get()
             if doc.exists:
                 return self._dict_to_incident(doc.to_dict())
             return None
@@ -206,30 +231,60 @@ class FirestoreStorage:
         status: IncidentStatus,
         resolved_at: Optional[datetime] = None
     ) -> Optional[Incident]:
-        """Update an incident's status in Firestore."""
+        """Update an incident's status in Firestore (checks both collections)."""
         try:
-            doc_ref = self.db.collection(self.INCIDENTS).document(incident_id)
-
             update_data = {"status": status.value}
             if resolved_at:
                 update_data["resolved_at"] = resolved_at
 
-            doc_ref.update(update_data)
+            # Try GCP collection first, then GChat
+            for col in [self.INCIDENTS, self.GCHAT_INCIDENTS]:
+                doc_ref = self.db.collection(col).document(incident_id)
+                doc = doc_ref.get()
+                if doc.exists:
+                    doc_ref.update(update_data)
+                    return self.get_incident(incident_id)
 
-            # Return updated incident
-            return self.get_incident(incident_id)
+            logger.warning(f"Incident {incident_id} not found in any collection")
+            return None
         except Exception as e:
             logger.error(f"Failed to update incident {incident_id}: {e}")
+            return None
+
+    def find_incident_by_gchat_thread(self, thread_id: str) -> Optional[Incident]:
+        """Find an active gchat incident by thread ID."""
+        try:
+            query = (
+                self.db.collection(self.GCHAT_INCIDENTS)
+                .where(filter=FieldFilter("gchat_metadata.thread_id", "==", thread_id))
+                .limit(1)
+            )
+            for doc in query.stream():
+                return self._dict_to_incident(doc.to_dict())
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to find gchat thread incident: {e}")
             return None
 
     def list_incidents(
         self,
         status: Optional[IncidentStatus] = None,
+        source: Optional[str] = None,
         limit: int = 100
     ) -> List[Incident]:
-        """List incidents from Firestore, optionally filtered by status."""
+        """List incidents from Firestore, optionally filtered by status and/or source.
+
+        GChat and GCP incidents live in separate collections, so source determines
+        which collection to query — no cross-collection filtering needed.
+        """
         try:
-            query = self.db.collection(self.INCIDENTS)
+            # Route to the correct collection based on source
+            if source == "gchat":
+                col = self.GCHAT_INCIDENTS
+            else:
+                col = self.INCIDENTS
+
+            query = self.db.collection(col)
 
             if status:
                 query = query.where(filter=FieldFilter("status", "==", status.value))
@@ -240,11 +295,12 @@ class FirestoreStorage:
             incidents = []
             for doc in query.stream():
                 try:
-                    incidents.append(self._dict_to_incident(doc.to_dict()))
+                    inc = self._dict_to_incident(doc.to_dict())
+                    incidents.append(inc)
                 except Exception as e:
                     logger.warning(f"Failed to parse incident {doc.id}: {e}")
 
-            return incidents
+            return incidents[:limit]
         except Exception as e:
             logger.error(f"Failed to list incidents: {e}")
             return []
@@ -280,15 +336,17 @@ class FirestoreStorage:
         """
         from datetime import datetime
         try:
-            doc_ref = self.db.collection(self.INCIDENTS).document(incident_id)
-            doc = doc_ref.get()
-            if doc.exists:
-                doc_ref.update({
-                    "occurrence_count": new_count,
-                    "last_occurrence": datetime.utcnow().isoformat(),
-                })
-                logger.debug(f"Incremented incident count: {incident_id} -> {new_count}")
-                return True
+            # Check both collections
+            for col in [self.INCIDENTS, self.GCHAT_INCIDENTS]:
+                doc_ref = self.db.collection(col).document(incident_id)
+                doc = doc_ref.get()
+                if doc.exists:
+                    doc_ref.update({
+                        "occurrence_count": new_count,
+                        "last_occurrence": datetime.utcnow().isoformat(),
+                    })
+                    logger.debug(f"Incremented incident count: {incident_id} -> {new_count} ({col})")
+                    return True
             return False
         except Exception as e:
             logger.error(f"Failed to increment incident count: {e}")
@@ -296,22 +354,58 @@ class FirestoreStorage:
 
     # ═══════════════ Triage Results ═══════════════
 
-    def save_triage_result(self, result: TriageResult) -> None:
-        """Save a triage result to Firestore."""
+    def get_triage_classifications_batch(self, incident_ids: List[str], source: Optional[str] = None) -> Dict[str, str]:
+        """Batch-fetch triage classifications for multiple incidents at once.
+
+        Uses Firestore get_all() for a single round-trip instead of N individual reads.
+        Returns a dict mapping incident_id -> classification value.
+        """
+        if not incident_ids:
+            return {}
         try:
-            doc_ref = self.db.collection(self.TRIAGE_RESULTS).document(result.incident_id)
+            col = self._col(self.TRIAGE_RESULTS, source)
+            doc_refs = [
+                self.db.collection(col).document(iid)
+                for iid in incident_ids
+            ]
+            results = {}
+            for doc in self.db.get_all(doc_refs):
+                if doc.exists:
+                    data = doc.to_dict()
+                    classification = data.get("classification")
+                    if classification:
+                        results[doc.id] = classification
+            return results
+        except Exception as e:
+            logger.error(f"Failed to batch-fetch triage classifications: {e}")
+            return {}
+
+    def _detect_source(self, incident_id: str) -> Optional[str]:
+        """Detect which source an incident belongs to by checking collections."""
+        doc = self.db.collection(self.GCHAT_INCIDENTS).document(incident_id).get()
+        if doc.exists:
+            return "gchat"
+        return None  # Default (gcp) — no need to check, it's the fallback
+
+    def save_triage_result(self, result: TriageResult) -> None:
+        """Save a triage result to Firestore (routes to gchat collection if needed)."""
+        try:
+            source = self._detect_source(result.incident_id)
+            col = self._col(self.TRIAGE_RESULTS, source)
+            doc_ref = self.db.collection(col).document(result.incident_id)
             doc_ref.set(self._triage_to_dict(result))
-            logger.debug(f"Saved triage result for {result.incident_id}")
+            logger.debug(f"Saved triage result for {result.incident_id} ({col})")
         except Exception as e:
             logger.error(f"Failed to save triage result: {e}")
             raise
 
     def get_triage_result(self, incident_id: str) -> Optional[TriageResult]:
-        """Get triage result for an incident from Firestore."""
+        """Get triage result for an incident from Firestore (checks both collections)."""
         try:
-            doc = self.db.collection(self.TRIAGE_RESULTS).document(incident_id).get()
-            if doc.exists:
-                return self._dict_to_triage(doc.to_dict())
+            for col in [self.TRIAGE_RESULTS, self.GCHAT_TRIAGE_RESULTS]:
+                doc = self.db.collection(col).document(incident_id).get()
+                if doc.exists:
+                    return self._dict_to_triage(doc.to_dict())
             return None
         except Exception as e:
             logger.error(f"Failed to get triage result: {e}")
@@ -320,21 +414,24 @@ class FirestoreStorage:
     # ═══════════════ Fix Results ═══════════════
 
     def save_fix_result(self, result: FixResult) -> None:
-        """Save a fix result to Firestore."""
+        """Save a fix result to Firestore (routes to gchat collection if needed)."""
         try:
-            doc_ref = self.db.collection(self.FIX_RESULTS).document(result.incident_id)
+            source = self._detect_source(result.incident_id)
+            col = self._col(self.FIX_RESULTS, source)
+            doc_ref = self.db.collection(col).document(result.incident_id)
             doc_ref.set(self._fix_to_dict(result))
-            logger.debug(f"Saved fix result for {result.incident_id}")
+            logger.debug(f"Saved fix result for {result.incident_id} ({col})")
         except Exception as e:
             logger.error(f"Failed to save fix result: {e}")
             raise
 
     def get_fix_result(self, incident_id: str) -> Optional[FixResult]:
-        """Get fix result for an incident from Firestore."""
+        """Get fix result for an incident from Firestore (checks both collections)."""
         try:
-            doc = self.db.collection(self.FIX_RESULTS).document(incident_id).get()
-            if doc.exists:
-                return self._dict_to_fix(doc.to_dict())
+            for col in [self.FIX_RESULTS, self.GCHAT_FIX_RESULTS]:
+                doc = self.db.collection(col).document(incident_id).get()
+                if doc.exists:
+                    return self._dict_to_fix(doc.to_dict())
             return None
         except Exception as e:
             logger.error(f"Failed to get fix result: {e}")
@@ -343,21 +440,24 @@ class FirestoreStorage:
     # ═══════════════ Test Results ═══════════════
 
     def save_test_result(self, result: TestResult) -> None:
-        """Save a test result to Firestore."""
+        """Save a test result to Firestore (routes to gchat collection if needed)."""
         try:
-            doc_ref = self.db.collection(self.TEST_RESULTS).document(result.incident_id)
+            source = self._detect_source(result.incident_id)
+            col = self._col(self.TEST_RESULTS, source)
+            doc_ref = self.db.collection(col).document(result.incident_id)
             doc_ref.set(self._test_to_dict(result))
-            logger.debug(f"Saved test result for {result.incident_id}")
+            logger.debug(f"Saved test result for {result.incident_id} ({col})")
         except Exception as e:
             logger.error(f"Failed to save test result: {e}")
             raise
 
     def get_test_result(self, incident_id: str) -> Optional[TestResult]:
-        """Get test result for an incident from Firestore."""
+        """Get test result for an incident from Firestore (checks both collections)."""
         try:
-            doc = self.db.collection(self.TEST_RESULTS).document(incident_id).get()
-            if doc.exists:
-                return self._dict_to_test(doc.to_dict())
+            for col in [self.TEST_RESULTS, self.GCHAT_TEST_RESULTS]:
+                doc = self.db.collection(col).document(incident_id).get()
+                if doc.exists:
+                    return self._dict_to_test(doc.to_dict())
             return None
         except Exception as e:
             logger.error(f"Failed to get test result: {e}")
@@ -366,21 +466,24 @@ class FirestoreStorage:
     # ═══════════════ Verification Results ═══════════════
 
     def save_verification_result(self, result: VerificationResult) -> None:
-        """Save a verification result to Firestore."""
+        """Save a verification result to Firestore (routes to gchat collection if needed)."""
         try:
-            doc_ref = self.db.collection(self.VERIFICATION_RESULTS).document(result.incident_id)
+            source = self._detect_source(result.incident_id)
+            col = self._col(self.VERIFICATION_RESULTS, source)
+            doc_ref = self.db.collection(col).document(result.incident_id)
             doc_ref.set(self._verification_to_dict(result))
-            logger.debug(f"Saved verification result for {result.incident_id}")
+            logger.debug(f"Saved verification result for {result.incident_id} ({col})")
         except Exception as e:
             logger.error(f"Failed to save verification result: {e}")
             raise
 
     def get_verification_result(self, incident_id: str) -> Optional[VerificationResult]:
-        """Get verification result for an incident from Firestore."""
+        """Get verification result for an incident from Firestore (checks both collections)."""
         try:
-            doc = self.db.collection(self.VERIFICATION_RESULTS).document(incident_id).get()
-            if doc.exists:
-                return self._dict_to_verification(doc.to_dict())
+            for col in [self.VERIFICATION_RESULTS, self.GCHAT_VERIFICATION_RESULTS]:
+                doc = self.db.collection(col).document(incident_id).get()
+                if doc.exists:
+                    return self._dict_to_verification(doc.to_dict())
             return None
         except Exception as e:
             logger.error(f"Failed to get verification result: {e}")
@@ -388,18 +491,22 @@ class FirestoreStorage:
 
     # ═══════════════ Metrics ═══════════════
 
-    def get_metrics(self) -> Metrics:
-        """Calculate metrics by querying Firestore."""
+    def get_metrics(self, source: Optional[str] = None) -> Metrics:
+        """Calculate metrics by querying Firestore, optionally filtered by source."""
         try:
-            incidents_ref = self.db.collection(self.INCIDENTS)
-            triage_ref = self.db.collection(self.TRIAGE_RESULTS)
+            # Route to correct collection based on source
+            if source == "gchat":
+                incident_col = self.GCHAT_INCIDENTS
+                triage_col = self.GCHAT_TRIAGE_RESULTS
+            else:
+                incident_col = self.INCIDENTS
+                triage_col = self.TRIAGE_RESULTS
 
-            # Get all incidents for metrics calculation
-            all_incidents = list(incidents_ref.stream())
+            all_incidents = list(self.db.collection(incident_col).stream())
 
             # Build a lookup of triage results by incident_id
             triage_by_incident = {}
-            for doc in triage_ref.stream():
+            for doc in self.db.collection(triage_col).stream():
                 data = doc.to_dict()
                 incident_id = data.get("incident_id")
                 if incident_id:
@@ -463,6 +570,78 @@ class FirestoreStorage:
             logger.error(f"Failed to get metrics: {e}")
             return Metrics()
 
+    # ═══════════════ Health Check Runs ═══════════════
+
+    HEALTH_CHECK_RUNS = "health_check_runs"
+
+    def _health_check_to_dict(self, run) -> Dict[str, Any]:
+        """Convert HealthCheckRun to Firestore document."""
+        data = run.model_dump()
+        data["started_at"] = run.started_at
+        if run.completed_at:
+            data["completed_at"] = run.completed_at
+        return data
+
+    def _dict_to_health_check(self, data: Dict[str, Any]):
+        """Convert Firestore document to HealthCheckRun."""
+        from backend.models import HealthCheckRun
+        return HealthCheckRun(**data)
+
+    def save_health_check_run(self, run) -> None:
+        """Save a health check run to Firestore and prune old entries."""
+        try:
+            doc_ref = self.db.collection(self.HEALTH_CHECK_RUNS).document(run.id)
+            doc_ref.set(self._health_check_to_dict(run))
+            logger.debug(f"Saved health check run {run.id}")
+            self._prune_health_check_runs()
+        except Exception as e:
+            logger.error(f"Failed to save health check run {run.id}: {e}")
+            raise
+
+    def _prune_health_check_runs(self) -> None:
+        """Keep only the 50 most recent health check runs."""
+        try:
+            query = (
+                self.db.collection(self.HEALTH_CHECK_RUNS)
+                .order_by("started_at", direction=firestore.Query.DESCENDING)
+                .offset(50)
+            )
+            for doc in query.stream():
+                doc.reference.delete()
+                logger.debug(f"Pruned old health check run {doc.id}")
+        except Exception as e:
+            logger.warning(f"Failed to prune health check runs: {e}")
+
+    def list_health_check_runs(self, limit: int = 50) -> list:
+        """List recent health check runs (newest first)."""
+        try:
+            query = (
+                self.db.collection(self.HEALTH_CHECK_RUNS)
+                .order_by("started_at", direction=firestore.Query.DESCENDING)
+                .limit(limit)
+            )
+            runs = []
+            for doc in query.stream():
+                try:
+                    runs.append(self._dict_to_health_check(doc.to_dict()))
+                except Exception as e:
+                    logger.warning(f"Failed to parse health check run {doc.id}: {e}")
+            return runs
+        except Exception as e:
+            logger.error(f"Failed to list health check runs: {e}")
+            return []
+
+    def get_health_check_run(self, run_id: str):
+        """Get a single health check run by ID."""
+        try:
+            doc = self.db.collection(self.HEALTH_CHECK_RUNS).document(run_id).get()
+            if doc.exists:
+                return self._dict_to_health_check(doc.to_dict())
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get health check run {run_id}: {e}")
+            return None
+
     # ═══════════════ Utility ═══════════════
 
     def clear(self) -> None:
@@ -476,6 +655,12 @@ class FirestoreStorage:
             self.TEST_RESULTS,
             self.VERIFICATION_RESULTS,
             self.SEEN_IDS,
+            self.GCHAT_INCIDENTS,
+            self.GCHAT_TRIAGE_RESULTS,
+            self.GCHAT_FIX_RESULTS,
+            self.GCHAT_TEST_RESULTS,
+            self.GCHAT_VERIFICATION_RESULTS,
+            self.HEALTH_CHECK_RUNS,
         ]
 
         for collection_name in collections:

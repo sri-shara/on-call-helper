@@ -43,6 +43,7 @@ from backend.knowledge import (
     # Runbooks
     suggest_runbook,
     get_investigation_steps,
+    get_diagnostic_commands,
     # Pattern learning
     get_pattern_learner,
 )
@@ -195,10 +196,15 @@ class TriageAgent:
             }
             logger.info(f"Suggested runbook for {incident.id}: {runbook.runbook_name}")
 
-        # 5. Get manual investigation steps
+        # 5. Get manual investigation steps and diagnostic commands
+        classification_hint = pre_analysis.get("pattern_classification", "NEEDS_HUMAN")
         pre_analysis["manual_steps"] = get_investigation_steps(
             incident.error_message,
-            pre_analysis.get("pattern_classification", "NEEDS_HUMAN")
+            classification_hint
+        )
+        pre_analysis["gcloud_commands"] = get_diagnostic_commands(
+            incident.error_message,
+            classification_hint
         )
 
         # 6. Historical pattern lookup (Pattern Learning)
@@ -690,6 +696,7 @@ class TriageAgent:
             # Optional INFRA_ISSUE fields
             runbook_reference=data.get("runbook_reference"),
             manual_steps=data.get("manual_steps"),
+            gcloud_commands=data.get("gcloud_commands"),
             # Additional context
             related_context=data.get("related_context", []),
         )
@@ -828,6 +835,10 @@ class TriageAgent:
                 # Add manual steps if not already present
                 if pre_analysis.get("manual_steps") and not result.manual_steps:
                     result.manual_steps = pre_analysis["manual_steps"]
+
+                # Add gcloud commands if not already present
+                if pre_analysis.get("gcloud_commands") and not result.gcloud_commands:
+                    result.gcloud_commands = pre_analysis["gcloud_commands"]
 
                 # Store pre-analysis for display
                 result.pre_analysis = pre_analysis

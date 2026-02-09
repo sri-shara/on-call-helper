@@ -54,6 +54,21 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to auto-start GCP polling: {e}")
 
+    # Migrate any gchat incidents from shared collection to separate collections
+    await _migrate_gchat_to_separate_collections()
+
+    # Recover incidents stuck in "triaging" status (lost tasks from previous restart)
+    await _recover_stuck_incidents()
+
+    # Auto-start Google Chat polling if enabled
+    if settings.gchat_auto_poll and settings.gchat_space_id:
+        logger.info(f"Auto-starting Google Chat polling (interval: {settings.gchat_poll_interval}s)")
+        try:
+            await _start_gchat_polling_internal(settings.gchat_poll_interval)
+            logger.info("Google Chat polling auto-started successfully")
+        except Exception as e:
+            logger.error(f"Failed to auto-start Google Chat polling: {e}")
+
     yield
 
     # Shutdown
@@ -68,9 +83,136 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error stopping GCP polling: {e}")
 
+    # Stop Google Chat polling if running
+    try:
+        gchat_poller = get_gchat_poller()
+        if gchat_poller.is_polling:
+            await gchat_poller.stop_polling()
+            logger.info("Google Chat polling stopped")
+    except Exception as e:
+        logger.error(f"Error stopping Google Chat polling: {e}")
+
     # Close WebSocket connections
     from backend.websocket_manager import ws_manager
     await ws_manager.close_all()
+
+
+async def _migrate_gchat_to_separate_collections():
+    """One-time migration: move gchat incidents from 'incidents' to 'gchat_incidents'.
+
+    Also migrates triage_results for those incidents to gchat_triage_results.
+    Safe to re-run — skips docs that already exist in the target collection.
+    """
+    import asyncio
+
+    # Only relevant for Firestore backend
+    from backend.storage_firestore import FirestoreStorage
+    if not isinstance(storage, FirestoreStorage):
+        return
+
+    def _migrate():
+        from google.cloud.firestore_v1 import FieldFilter
+        db = storage.db
+        migrated = 0
+
+        # Find gchat incidents in the old collection
+        query = db.collection("incidents").where(
+            filter=FieldFilter("source", "==", "gchat")
+        )
+        for doc in query.stream():
+            doc_id = doc.id
+            data = doc.to_dict()
+
+            # Copy to gchat_incidents (skip if already there)
+            target_ref = db.collection("gchat_incidents").document(doc_id)
+            if not target_ref.get().exists:
+                target_ref.set(data)
+                logger.info(f"Migrated incident {doc_id} to gchat_incidents")
+
+            # Also migrate triage result if it exists
+            triage_doc = db.collection("triage_results").document(doc_id).get()
+            if triage_doc.exists:
+                triage_target = db.collection("gchat_triage_results").document(doc_id)
+                if not triage_target.get().exists:
+                    triage_target.set(triage_doc.to_dict())
+                    logger.info(f"Migrated triage result {doc_id} to gchat_triage_results")
+
+            # Delete from old collection
+            doc.reference.delete()
+            old_triage = db.collection("triage_results").document(doc_id)
+            if old_triage.get().exists:
+                old_triage.delete()
+
+            migrated += 1
+
+        if migrated:
+            logger.info(f"Migrated {migrated} gchat incidents to separate collections")
+        else:
+            logger.debug("No gchat incidents to migrate")
+
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, _migrate)
+    except Exception as e:
+        logger.error(f"GChat migration failed (non-fatal): {e}")
+
+
+async def _recover_stuck_incidents():
+    """Recover incidents stuck in 'triaging' or 'fixing' status from a previous restart.
+
+    When the server restarts, any in-flight pipeline tasks are lost. This finds
+    incidents in transient statuses and re-triggers their pipeline.
+    """
+    import asyncio
+    from backend.models import IncidentStatus
+    from backend.agents.orchestrator import PipelineOrchestrator
+    from backend.websocket_manager import create_pipeline_event_callback
+
+    transient_statuses = [IncidentStatus.TRIAGING, IncidentStatus.FIXING]
+    recovered = 0
+
+    for status in transient_statuses:
+        try:
+            # Check both GCP and GChat collections
+            stuck = storage.list_incidents(status=status, limit=50)
+            stuck += storage.list_incidents(status=status, source="gchat", limit=50)
+            for incident in stuck:
+                # Check if triage result already exists (task completed before crash)
+                triage = storage.get_triage_result(incident.id)
+                if triage and status == IncidentStatus.TRIAGING:
+                    # Triage finished but status wasn't updated — just fix status
+                    storage.update_incident_status(incident.id, IncidentStatus.FIXED)
+                    logger.info(f"Recovered {incident.id}: had triage result, marked fixed")
+                    recovered += 1
+                    continue
+
+                # Re-run pipeline
+                logger.info(f"Re-triggering pipeline for stuck incident {incident.id} (status={status.value})")
+                storage.update_incident_status(incident.id, IncidentStatus.ACTIVE)
+
+                async def _rerun(inc=incident):
+                    try:
+                        callback = create_pipeline_event_callback()
+                        orchestrator = PipelineOrchestrator(
+                            event_callback=lambda e: asyncio.create_task(callback(e)),
+                            skip_sandbox=True,
+                            skip_verification=True,
+                        )
+                        result = await orchestrator.process_incident(inc)
+                        logger.info(f"Recovery pipeline done for {inc.id}: success={result.success}")
+                    except Exception as e:
+                        logger.error(f"Recovery pipeline failed for {inc.id}: {e}")
+                        storage.update_incident_status(inc.id, IncidentStatus.ACTIVE)
+
+                asyncio.create_task(_rerun())
+                recovered += 1
+        except Exception as e:
+            logger.error(f"Error recovering stuck {status.value} incidents: {e}")
+
+    if recovered:
+        logger.info(f"Recovered {recovered} stuck incidents")
+    else:
+        logger.info("No stuck incidents found to recover")
 
 
 # Create FastAPI app
@@ -165,21 +307,20 @@ async def info():
 
 # ═══════════════ Metrics Endpoint ═══════════════
 
+from typing import Optional
 
 @app.get("/metrics", tags=["Metrics"], response_model=Metrics)
-async def get_metrics():
-    """Get current incident processing metrics."""
-    return storage.get_metrics()
+async def get_metrics(source: Optional[str] = None):
+    """Get current incident processing metrics, optionally filtered by source."""
+    return storage.get_metrics(source=source)
 
 
 # ═══════════════ Incidents Endpoints ═══════════════
 
-
-from typing import Optional
-
 @app.get("/incidents", tags=["Incidents"])
-async def list_incidents(status: Optional[str] = None, limit: int = 100):
-    """List incidents, optionally filtered by status."""
+async def list_incidents(status: Optional[str] = None, source: Optional[str] = None, limit: int = 100):
+    """List incidents, optionally filtered by status and/or source."""
+    import asyncio
     from backend.models import IncidentStatus
 
     status_filter = None
@@ -192,20 +333,28 @@ async def list_incidents(status: Optional[str] = None, limit: int = 100):
                 content={"error": f"Invalid status: {status}"}
             )
 
-    incidents = storage.list_incidents(status=status_filter, limit=limit)
+    # Run blocking Firestore calls in thread pool to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
 
-    # Include triage classification for consistent status display
-    incident_list = []
-    for inc in incidents:
-        inc_data = inc.model_dump()
-        triage = storage.get_triage_result(inc.id)
-        if triage:
-            inc_data["triage_classification"] = triage.classification.value
-        incident_list.append(inc_data)
+    def _fetch_incidents_with_triage():
+        incidents = storage.list_incidents(status=status_filter, source=source, limit=limit)
+        # Batch-fetch all triage classifications in one Firestore call
+        incident_ids = [inc.id for inc in incidents]
+        triage_map = storage.get_triage_classifications_batch(incident_ids, source=source)
+        incident_list = []
+        for inc in incidents:
+            inc_data = inc.model_dump()
+            classification = triage_map.get(inc.id)
+            if classification:
+                inc_data["triage_classification"] = classification
+            incident_list.append(inc_data)
+        return incident_list
+
+    incident_list = await loop.run_in_executor(None, _fetch_incidents_with_triage)
 
     return {
         "incidents": incident_list,
-        "count": len(incidents),
+        "count": len(incident_list),
     }
 
 
@@ -235,12 +384,13 @@ async def get_incident(incident_id: str):
 
 
 @app.get("/incidents/all/details", tags=["Incidents"])
-async def get_all_incidents_with_details(status: Optional[str] = None, limit: int = 100):
+async def get_all_incidents_with_details(status: Optional[str] = None, source: Optional[str] = None, limit: int = 100):
     """
     Get all incidents with complete details (triage, fix, test, verification).
-    
+
     Useful for displaying in a table view with all AI agent outputs.
     """
+    import asyncio
     from backend.models import IncidentStatus
 
     status_filter = None
@@ -253,24 +403,34 @@ async def get_all_incidents_with_details(status: Optional[str] = None, limit: in
                 content={"error": f"Invalid status: {status}"}
             )
 
-    incidents = storage.list_incidents(status=status_filter, limit=limit)
-    
-    # Build response with all related data
-    result = []
-    for incident in incidents:
-        triage = storage.get_triage_result(incident.id)
-        fix = storage.get_fix_result(incident.id)
-        test = storage.get_test_result(incident.id)
-        verification = storage.get_verification_result(incident.id)
-        
-        result.append({
-            "incident": incident.model_dump(),
-            "triage": triage.model_dump() if triage else None,
-            "fix": fix.model_dump() if fix else None,
-            "test": test.model_dump() if test else None,
-            "verification": verification.model_dump() if verification else None,
-        })
-    
+    loop = asyncio.get_event_loop()
+
+    def _fetch_all_details():
+        incidents = storage.list_incidents(status=status_filter, source=source, limit=limit)
+
+        # Batch-fetch triage classifications to avoid N individual reads
+        incident_ids = [inc.id for inc in incidents]
+        triage_map = storage.get_triage_classifications_batch(incident_ids, source=source)
+
+        result = []
+        for incident in incidents:
+            inc_data = {
+                "incident": incident.model_dump(),
+                "triage": None,
+                "fix": None,
+                "test": None,
+                "verification": None,
+            }
+            # Add classification from batch lookup
+            classification = triage_map.get(incident.id)
+            if classification:
+                inc_data["incident"]["triage_classification"] = classification
+            result.append(inc_data)
+
+        return result
+
+    result = await loop.run_in_executor(None, _fetch_all_details)
+
     return {
         "incidents": result,
         "count": len(result),
@@ -303,8 +463,9 @@ async def resolve_incident(incident_id: str):
     )
 
     # Broadcast update via WebSocket
+    from backend.websocket_manager import EventType
     await ws_manager.broadcast(
-        "incident_resolved",
+        EventType.INCIDENT_RESOLVED,
         {
             "incident_id": incident_id,
             "status": "fixed",
@@ -661,6 +822,104 @@ async def receive_gcp_logs(request: Request):
         )
 
 
+# ═══════════════ Google Chat Webhook ═══════════════
+
+
+@app.post("/webhook/gchat", tags=["Webhooks"])
+async def receive_gchat_message(request: Request):
+    """
+    Receive Google Chat interaction events.
+
+    Google Chat App sends MESSAGE events when messages appear
+    in the configured space. Structured alert messages are parsed
+    into incidents and processed through the triage pipeline.
+    """
+    from backend.services.gchat import (
+        parse_gchat_event,
+        parse_alert_text,
+        create_incident_from_gchat,
+    )
+
+    try:
+        data = await request.json()
+    except Exception as e:
+        logger.error(f"Failed to parse GChat webhook body: {e}")
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+    # Parse the interaction event
+    try:
+        event = parse_gchat_event(data)
+    except Exception as e:
+        logger.error(f"Failed to parse GChat event: {e}")
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    # Only process MESSAGE events
+    if event.event_type != "MESSAGE":
+        logger.debug(f"Ignoring GChat event type: {event.event_type}")
+        return {"status": "ignored", "reason": f"Event type {event.event_type} not processed"}
+
+    # Only process messages from the configured space
+    if event.space_id != settings.gchat_space_id:
+        logger.debug(f"Ignoring message from space: {event.space_id}")
+        return {"status": "ignored", "reason": "Message from unconfigured space"}
+
+    # Check for thread-based deduplication
+    if event.thread_id:
+        existing = storage.find_incident_by_gchat_thread(event.thread_id)
+        if existing:
+            new_count = existing.occurrence_count + 1
+            storage.increment_incident_count(existing.id, new_count)
+            from backend.websocket_manager import ws_manager, EventType
+            await ws_manager.broadcast(
+                EventType.INCIDENT_UPDATED,
+                {"incident_id": existing.id, "occurrence_count": new_count},
+            )
+            logger.info(f"GChat thread update: {existing.id} (count: {new_count})")
+            return {"text": f"Updated case {existing.id} (occurrence #{new_count})"}
+
+    # Parse alert from message text
+    alert = parse_alert_text(event.text)
+    incident = create_incident_from_gchat(event, alert)
+
+    # Save incident
+    storage.save_incident(incident)
+    logger.info(f"GChat case created: {incident.id} - {incident.title} (service: {incident.service_name})")
+
+    # Broadcast via WebSocket
+    from backend.websocket_manager import ws_manager, create_pipeline_event_callback
+    await ws_manager.broadcast_incident_created(
+        incident_id=incident.id,
+        title=incident.title,
+        service=incident.service_name,
+        severity=incident.severity.value,
+        source="gchat",
+    )
+
+    # Run triage pipeline in background
+    import asyncio
+    from backend.agents.orchestrator import PipelineOrchestrator
+
+    async def run_gchat_pipeline():
+        try:
+            callback = create_pipeline_event_callback()
+            orchestrator = PipelineOrchestrator(
+                event_callback=lambda e: asyncio.create_task(callback(e)),
+                skip_sandbox=True,
+                skip_verification=True,
+            )
+            result = await orchestrator.process_incident(incident)
+            logger.info(f"GChat pipeline completed for {incident.id}: success={result.success}")
+        except Exception as e:
+            logger.error(f"GChat pipeline failed for {incident.id}: {e}")
+            # Reset to active so it doesn't stay stuck in "triaging" forever
+            from backend.models import IncidentStatus
+            storage.update_incident_status(incident.id, IncidentStatus.ACTIVE)
+
+    asyncio.create_task(run_gchat_pipeline())
+
+    return {"text": f"Case {incident.id} created. Triaging..."}
+
+
 @app.post("/webhook/test", tags=["Webhooks"])
 async def test_webhook(request: Request):
     """
@@ -756,6 +1015,259 @@ async def test_webhook(request: Request):
     }
 
 
+# ═══════════════ Health Check Endpoints ═══════════════
+
+_checkout_lock = False
+
+
+@app.get("/health-checks", tags=["Health Checks"])
+async def list_health_check_runs():
+    """List recent health check runs (newest first, without output)."""
+    import asyncio
+
+    loop = asyncio.get_event_loop()
+    runs = await loop.run_in_executor(None, lambda: storage.list_health_check_runs(limit=50))
+    return {
+        "runs": [
+            {
+                "id": r.id,
+                "started_at": r.started_at.isoformat() if r.started_at else None,
+                "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+                "status": r.status,
+                "exit_code": r.exit_code,
+                "duration_seconds": r.duration_seconds,
+            }
+            for r in runs
+        ],
+        "count": len(runs),
+    }
+
+
+@app.get("/health-checks/{run_id}", tags=["Health Checks"])
+async def get_health_check_run(run_id: str):
+    """Get a single health check run with full output."""
+    import asyncio
+
+    loop = asyncio.get_event_loop()
+    run = await loop.run_in_executor(None, lambda: storage.get_health_check_run(run_id))
+    if not run:
+        return JSONResponse(status_code=404, content={"error": f"Run not found: {run_id}"})
+    return run.model_dump()
+
+
+@app.post("/health-checks/{run_id}/summarize", tags=["Health Checks"])
+async def summarize_health_check(run_id: str):
+    """Summarize a health check run's output for sharing in Google Chat."""
+    import asyncio
+    from backend.ai_client import create_ai_client, get_triage_model
+
+    loop = asyncio.get_event_loop()
+    run = await loop.run_in_executor(None, lambda: storage.get_health_check_run(run_id))
+    if not run:
+        return JSONResponse(status_code=404, content={"error": f"Run not found: {run_id}"})
+    if not run.output or not run.output.strip():
+        return JSONResponse(status_code=400, content={"error": "No output to summarize"})
+
+    client = create_ai_client()
+    if not client:
+        return JSONResponse(status_code=500, content={"error": "AI client not configured"})
+
+    duration_str = f" in {run.duration_seconds}s" if run.duration_seconds else ""
+    timestamp = run.started_at.strftime("%Y-%m-%d %H:%M UTC") if run.started_at else "unknown"
+
+    system_prompt = (
+        "You are an SRE assistant that produces structured on-call status reports from health check output. "
+        "Extract the ACTUAL data and numbers from the output — never fabricate or approximate metrics.\n\n"
+        "Format the report using these exact sections in order. "
+        "Include EVERY section that has data in the output. Skip only if truly absent.\n\n"
+        "INFRASTRUCTURE HEALTH\n"
+        "  One line per service, left-aligned with consistent padding, ✅/❌/⚠️ prefix and key metrics.\n"
+        "  Format exactly like:\n"
+        "  AlloyDB:         ✅ CPU 5.5% | 21 conns | 0ms wait\n"
+        "  Pub/Sub:         ✅ All backlogs 0s\n"
+        "  Entity Enricher: ✅ Active (19/19 enricher, 21/21 extractor), 0 errors\n"
+        "  Cloud Run Jobs:  ✅ 35 successful, 0 failed\n"
+        "  Gemini API:      ⚠️ 1 x 503 overloaded\n"
+        "  Incidents:       ✅ None open\n\n"
+        "PRODUCTION CUSTOMER ACTIVITY (1hr / 24hr / 5d) — alerts as soc_actionable/total\n"
+        "  One line per customer, aligned columns. Format:\n"
+        "  Hawkeye    ✅ Active    3/3   | 97/98   | 515/519    |  3 cases/hr\n"
+        "  RLI        ✅ Active   0/49   | 0/315   | 0/352      |  1 cases/hr\n"
+        "  IPA        ⚠️ Quiet     0/0   | 0/140   | 0/168      |  0 cases/hr\n"
+        "  Use ✅ Active, ⚠️ Quiet, Low, or Inactive based on the data. Sort by total activity desc.\n\n"
+        "CASE EVENTS VOLUME (10min / 1hr / 24hr)\n"
+        "  Show per-tenant if any have elevated volume. Include flood warnings if present.\n\n"
+        "DEMO TENANT CHECK\n"
+        "  Only include if demo tenants have event floods. Otherwise one line: ✅ No demo floods.\n\n"
+        "CASES TODAY — soc_actionable breakdown\n"
+        "  Per-customer: cases count, cases with soc_actionable, actionable/total alerts.\n"
+        "  Format: Hawkeye:    72 cases (72 w/ soc_act, 72/72 alerts actionable)\n"
+        "  Add a Notable line calling out customers with zero actionable alerts and their numbers.\n\n"
+        "ANALYST ACTIVITY TODAY\n"
+        "  Show active analysts and total actions per customer if data present.\n\n"
+        "ANALYST TRIAGE TODAY\n"
+        "  Per-customer: closed, false_positive, in_progress, awaiting_client, total.\n"
+        "  Format: Hawkeye:   72 closed (73 total)\n\n"
+        "5-DAY TREND\n"
+        "  One line per day: date, cases, alerts, DAU. ✓ for normal, 🟡 for anomalies.\n"
+        "  Note if current day is in progress.\n\n"
+        "ALERT PIPELINE HEALTH\n"
+        "  Alert-to-case: ✅/❌ with stuck alert count if any.\n\n"
+        "OPEN CASE ACCUMULATION\n"
+        "  Per-tenant open case counts if any are elevated. Include BQ sync drift notes.\n\n"
+        "INTEGRATIONS\n"
+        "  SOAR:      ✅/⚠️ with error count\n"
+        "  GenAI:     ✅/⚠️ with 15min and 24hr error counts\n"
+        "  Ingestion: ✅/❌ with JSONB failure count\n\n"
+        "ERROR SUMMARY\n"
+        "  Top services by error count (last 15min) if any errors exist.\n\n"
+        "⚠️ ITEMS TO WATCH\n"
+        "  Bullet list of EVERYTHING concerning found in the output:\n"
+        "  • High open case counts (include tenant name and number)\n"
+        "  • Error spikes (include service name and count)\n"
+        "  • Zero-actionable customers with high alert volume\n"
+        "  • Anomalous daily trends\n"
+        "  • Approaching thresholds\n"
+        "  • Demo tenant floods\n"
+        "  • Any CRITICAL or WARNING messages from the output\n"
+        "  Include specific numbers for every item.\n\n"
+        "Rules:\n"
+        "- PLAIN TEXT only — no markdown (no #, no **, no ```)\n"
+        "- Use spaces for alignment to make columns line up\n"
+        "- Preserve EXACT numbers from the output — never round, estimate, or fabricate\n"
+        "- Use ✅ for healthy, ❌ for broken, ⚠️ for warning/degraded, 🟡 for elevated\n"
+        "- This goes directly into a Google Chat message — keep it compact but data-complete\n"
+        "- If data for a section is missing or the query failed, write: (no data available)"
+    )
+
+    user_msg = (
+        f"Health check ran at {timestamp}, status: {run.status}{duration_str}.\n\n"
+        f"Full output:\n{run.output[:16000]}"
+    )
+
+    try:
+        message = await asyncio.to_thread(
+            client.messages.create,
+            model=get_triage_model(),
+            max_tokens=8192,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        summary_text = message.content[0].text.strip()
+        return {"summary": summary_text, "run_id": run_id, "status": run.status}
+    except Exception as e:
+        logger.error(f"Health check summarize failed: {e}")
+        return JSONResponse(status_code=500, content={"error": f"Summarization failed: {str(e)}"})
+
+
+@app.post("/health-checks/run", tags=["Health Checks"])
+async def run_health_check_stream():
+    """
+    Trigger a new health check run and stream output via SSE.
+
+    Returns text/event-stream with events:
+      - event: metadata   data: {"id": "hc-xxx", "started_at": "..."}
+      - event: output     data: {"line": "..."}
+      - event: complete   data: {"id": "hc-xxx", "status": "completed", ...}
+      - event: error      data: {"message": "..."}
+    """
+    import asyncio
+    import json
+    import os
+    import time
+    import uuid
+
+    from fastapi.responses import StreamingResponse
+    from backend.models import HealthCheckRun
+
+    global _checkout_lock
+    if _checkout_lock:
+        return JSONResponse(status_code=409, content={"error": "Health check already running"})
+
+    script_path = str(settings.oncall_repo_path / "scripts" / "oncall-checkout.sh")
+    if not os.path.isfile(script_path):
+        return JSONResponse(status_code=404, content={"error": f"Script not found: {script_path}"})
+
+    run_id = f"hc-{uuid.uuid4().hex[:12]}"
+
+    async def event_generator():
+        global _checkout_lock
+        _checkout_lock = True
+        start = time.time()
+
+        run = HealthCheckRun(id=run_id, started_at=datetime.utcnow(), status="running")
+        storage.save_health_check_run(run)
+
+        # Send metadata event
+        yield f"event: metadata\ndata: {json.dumps({'id': run_id, 'started_at': run.started_at.isoformat()})}\n\n"
+
+        output_lines = []
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "bash", script_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, "TERM": "dumb"},
+            )
+
+            # Read stdout line-by-line and stream as SSE
+            while True:
+                try:
+                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=300)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    raise asyncio.TimeoutError()
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace")
+                output_lines.append(decoded)
+                yield f"event: output\ndata: {json.dumps({'line': decoded})}\n\n"
+
+            await proc.wait()
+            duration = time.time() - start
+            status = "completed" if proc.returncode == 0 else "failed"
+
+            # Save final result
+            run.completed_at = datetime.utcnow()
+            run.status = status
+            run.exit_code = proc.returncode
+            run.duration_seconds = round(duration, 1)
+            run.output = "".join(output_lines)
+            storage.save_health_check_run(run)
+
+            yield f"event: complete\ndata: {json.dumps({'id': run_id, 'status': status, 'exit_code': proc.returncode, 'duration_seconds': round(duration, 1)})}\n\n"
+
+        except asyncio.TimeoutError:
+            duration = time.time() - start
+            run.completed_at = datetime.utcnow()
+            run.status = "timeout"
+            run.duration_seconds = round(duration, 1)
+            run.output = "".join(output_lines)
+            storage.save_health_check_run(run)
+            yield f"event: error\ndata: {json.dumps({'message': 'Script timed out after 5 minutes', 'id': run_id})}\n\n"
+
+        except Exception as e:
+            logger.error(f"Health check run failed: {e}")
+            run.completed_at = datetime.utcnow()
+            run.status = "failed"
+            run.output = "".join(output_lines)
+            storage.save_health_check_run(run)
+            yield f"event: error\ndata: {json.dumps({'message': str(e), 'id': run_id})}\n\n"
+
+        finally:
+            _checkout_lock = False
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # ═══════════════ GCP Polling Endpoints ═══════════════
 
 
@@ -795,13 +1307,15 @@ async def _start_gcp_polling_internal(interval_seconds: int = 30):
         4. Tenant filter - skip demo tenants
         5. Transient check - auto-resolve if transient pattern
         6. Save and broadcast (if not aggregated)
-        7. Run triage pipeline (if not auto-resolved)
+        7. Run triage pipeline
         """
         from backend.filters.transient import is_transient_error
         from backend.filters.tenant import should_process_tenant
         from backend.filters.service_filter import should_process_service
         from backend.services.error_aggregator import get_error_aggregator
+        from backend.knowledge.pattern_learner import get_pattern_learner
         from backend.models import IncidentStatus
+        from backend.config import settings
 
         # 1. Service filter - skip K8s infrastructure noise
         should_process, service_reason = should_process_service(
@@ -844,13 +1358,51 @@ async def _start_gcp_polling_internal(interval_seconds: int = 30):
             logger.info(f"Filtered by tenant: {tenant_reason} (incident: {incident.id})")
             return
 
-        # 5. Check for transient patterns - create but auto-resolve
+        # 5. Check for transient patterns - discard entirely (Layer 1: regex)
         is_transient, transient_reason, category = is_transient_error(incident.error_message)
         if is_transient:
-            incident.status = IncidentStatus.FILTERED
-            incident.auto_resolved = True
-            incident.auto_resolve_reason = f"[{category}] {transient_reason}"
-            logger.info(f"Auto-resolving transient [{category}]: {transient_reason}")
+            logger.info(f"Discarding transient [{category}]: {transient_reason} (incident: {incident.id})")
+            # Record pattern so system learns from discards
+            try:
+                pattern_learner = get_pattern_learner()
+                pattern_learner.record_incident(
+                    incident_id=incident.id,
+                    error_msg=incident.error_message,
+                    service=incident.service_name,
+                    classification="transient",
+                )
+            except Exception as e:
+                logger.warning(f"Pattern recording failed for discarded transient: {e}")
+            return
+
+        # 5b. Pattern-learning-based auto-discard (Layer 2: learned patterns)
+        if settings.pattern_learning_enabled:
+            try:
+                pattern_learner = get_pattern_learner()
+                suggestion = pattern_learner.get_pattern_suggestion(
+                    incident.error_message, incident.service_name
+                )
+                if (
+                    suggestion
+                    and suggestion.classification == "transient"
+                    and suggestion.occurrence_count >= settings.pattern_min_occurrences
+                    and suggestion.success_rate >= settings.pattern_override_success_rate
+                    and suggestion.confidence >= settings.pattern_override_confidence
+                ):
+                    logger.info(
+                        f"Pattern-learned discard: {suggestion.pattern_id} "
+                        f"({suggestion.occurrence_count} occurrences, "
+                        f"{suggestion.success_rate:.0%} transient) (incident: {incident.id})"
+                    )
+                    pattern_learner.record_incident(
+                        incident_id=incident.id,
+                        error_msg=incident.error_message,
+                        service=incident.service_name,
+                        classification="transient",
+                    )
+                    return
+            except Exception as e:
+                logger.warning(f"Pattern-based discard check failed: {e}")
 
         # 6. Save incident and register for aggregation
         storage.save_incident(incident)
@@ -864,11 +1416,7 @@ async def _start_gcp_polling_internal(interval_seconds: int = 30):
             severity=incident.severity.value,
         )
 
-        # 8. Run pipeline (skip for auto-resolved transient errors)
-        if incident.auto_resolved:
-            logger.info(f"Skipping pipeline for auto-resolved incident: {incident.id}")
-            return
-
+        # 8. Run triage pipeline
         callback = create_pipeline_event_callback()
         orchestrator = PipelineOrchestrator(
             event_callback=lambda e: asyncio.create_task(callback(e)),
@@ -888,6 +1436,143 @@ async def _start_gcp_polling_internal(interval_seconds: int = 30):
         "message": f"GCP polling started (every {interval_seconds}s)",
         "project_id": gcp_service.project_id,
         "filter": gcp_service.log_filter,
+    }
+
+
+# ═══════════════ Google Chat Polling Endpoints ═══════════════
+
+
+# Global Google Chat poller instance
+_gchat_poller = None
+
+
+def get_gchat_poller():
+    """Get or create the Google Chat poller."""
+    global _gchat_poller
+    if _gchat_poller is None:
+        from backend.services.gchat_poller import GoogleChatPoller
+        creds_path = settings.gchat_credentials_path or None
+        _gchat_poller = GoogleChatPoller(
+            space_id=settings.gchat_space_id,
+            credentials_path=creds_path,
+        )
+    return _gchat_poller
+
+
+async def _start_gchat_polling_internal(interval_seconds: int = 30):
+    """Internal function to start Google Chat polling."""
+    from backend.services.gchat import (
+        parse_gchat_event,
+        parse_alert_text,
+        create_incident_from_gchat,
+    )
+    from backend.websocket_manager import ws_manager, create_pipeline_event_callback, EventType
+    from backend.agents.orchestrator import PipelineOrchestrator
+    import asyncio
+
+    poller = get_gchat_poller()
+
+    if poller.is_polling:
+        return {"status": "already_running", "message": "Google Chat polling is already active"}
+
+    async def process_chat_message(raw_msg: dict):
+        """
+        Process a raw Chat API message dict.
+
+        Wraps it into the webhook event format so parse_gchat_event can handle it,
+        then follows the same flow as receive_gchat_message.
+        """
+        # Wrap raw message into webhook-style event dict
+        event_data = {
+            "type": "MESSAGE",
+            "space": raw_msg.get("space", {"name": settings.gchat_space_id}),
+            "message": raw_msg,
+        }
+
+        event = parse_gchat_event(event_data)
+
+        # Thread-based deduplication
+        if event.thread_id:
+            existing = storage.find_incident_by_gchat_thread(event.thread_id)
+            if existing:
+                new_count = existing.occurrence_count + 1
+                storage.increment_incident_count(existing.id, new_count)
+                await ws_manager.broadcast(
+                    EventType.INCIDENT_UPDATED,
+                    {"incident_id": existing.id, "occurrence_count": new_count},
+                )
+                logger.info(f"GChat poll thread update: {existing.id} (count: {new_count})")
+                return
+
+        # Parse alert from message text
+        alert = parse_alert_text(event.text)
+        incident = create_incident_from_gchat(event, alert)
+
+        # Save incident
+        storage.save_incident(incident)
+        logger.info(f"GChat poll case created: {incident.id} - {incident.title}")
+
+        # Broadcast via WebSocket
+        await ws_manager.broadcast_incident_created(
+            incident_id=incident.id,
+            title=incident.title,
+            service=incident.service_name,
+            severity=incident.severity.value,
+            source="gchat",
+        )
+
+        # Run triage pipeline in background
+        async def run_gchat_pipeline():
+            try:
+                callback = create_pipeline_event_callback()
+                orchestrator = PipelineOrchestrator(
+                    event_callback=lambda e: asyncio.create_task(callback(e)),
+                    skip_sandbox=True,
+                    skip_verification=True,
+                )
+                result = await orchestrator.process_incident(incident)
+                logger.info(f"GChat poll pipeline completed for {incident.id}: success={result.success}")
+            except Exception as e:
+                logger.error(f"GChat poll pipeline failed for {incident.id}: {e}")
+                from backend.models import IncidentStatus
+                storage.update_incident_status(incident.id, IncidentStatus.ACTIVE)
+
+        asyncio.create_task(run_gchat_pipeline())
+
+    await poller.start_polling(process_chat_message, interval_seconds)
+
+    return {
+        "status": "started",
+        "message": f"Google Chat polling started (every {interval_seconds}s)",
+        "space_id": settings.gchat_space_id,
+    }
+
+
+@app.post("/gchat/polling/start", tags=["Google Chat"])
+async def start_gchat_polling(interval_seconds: int = 30):
+    """Start polling Google Chat for new messages."""
+    return await _start_gchat_polling_internal(interval_seconds)
+
+
+@app.post("/gchat/polling/stop", tags=["Google Chat"])
+async def stop_gchat_polling():
+    """Stop polling Google Chat."""
+    poller = get_gchat_poller()
+
+    if not poller.is_polling:
+        return {"status": "not_running", "message": "Google Chat polling is not active"}
+
+    await poller.stop_polling()
+    return {"status": "stopped", "message": "Google Chat polling stopped"}
+
+
+@app.get("/gchat/polling/status", tags=["Google Chat"])
+async def gchat_polling_status():
+    """Get current Google Chat polling status."""
+    poller = get_gchat_poller()
+    return {
+        "is_polling": poller.is_polling,
+        "space_id": settings.gchat_space_id,
     }
 
 

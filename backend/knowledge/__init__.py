@@ -56,6 +56,7 @@ from .runbooks import (
     get_runbook_suggester,
     suggest_runbook,
     get_investigation_steps,
+    get_diagnostic_commands,
 )
 
 from .pattern_learner import (
@@ -102,6 +103,7 @@ __all__ = [
     "get_runbook_suggester",
     "suggest_runbook",
     "get_investigation_steps",
+    "get_diagnostic_commands",
     # Pattern Learning
     "PatternLearner",
     "get_pattern_learner",

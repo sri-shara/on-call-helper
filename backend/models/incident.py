@@ -88,6 +88,10 @@ class Incident(BaseModel):
     auto_resolved: bool = Field(False, description="Was auto-resolved as transient")
     auto_resolve_reason: Optional[str] = Field(None, description="Why it was auto-resolved")
 
+    # Source tracking
+    source: str = Field("gcp", description="Incident source: 'gcp' or 'gchat'")
+    gchat_metadata: Optional[Dict[str, Any]] = Field(None, description="Google Chat metadata: space_id, thread_id, message_id, sender")
+
     class Config:
         json_encoders = {datetime: lambda v: v.isoformat()}
 
@@ -116,6 +120,7 @@ class TriageResult(BaseModel):
     # For INFRA_ISSUE classification
     runbook_reference: Optional[str] = Field(None, description="Runbook to follow")
     manual_steps: Optional[List[str]] = Field(None, description="Manual intervention steps")
+    gcloud_commands: Optional[List[str]] = Field(None, description="Copy-paste gcloud/SQL commands for diagnosis")
 
     # Metadata
     related_context: List[str] = Field(default_factory=list, description="Related patterns/warnings")
@@ -310,3 +315,15 @@ class PatternSuggestion(BaseModel):
     occurrence_count: int = Field(..., description="How many times this pattern was seen")
     success_rate: float = Field(..., ge=0.0, le=1.0, description="Historical success rate")
     suggested_fix: Optional[FixRecord] = Field(None, description="Most recent successful fix")
+
+
+class HealthCheckRun(BaseModel):
+    """A single execution of the oncall-checkout health check script."""
+
+    id: str = Field(..., description="Run ID (hc-<uuid>)")
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: Optional[datetime] = None
+    status: str = Field("running", description="running | completed | failed | timeout")
+    exit_code: Optional[int] = None
+    duration_seconds: Optional[float] = None
+    output: Optional[str] = None

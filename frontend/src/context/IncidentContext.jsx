@@ -114,6 +114,7 @@ export function IncidentProvider({ children }) {
             severity: data.severity,
             status: 'active',
             createdAt: timestamp,
+            source: data.source || 'gcp',
             stages: [],
             occurrenceCount: data.occurrence_count || 1,
           },
@@ -296,32 +297,40 @@ export function IncidentProvider({ children }) {
     onDisconnect: () => dispatch({ type: ActionTypes.SET_CONNECTED, payload: false }),
   })
 
-  // Fetch initial incidents
+  // Fetch initial incidents (both GCP and GChat collections)
   const fetchIncidents = useCallback(async () => {
-    try {
-      const response = await fetch('/api/incidents')
-      if (response.ok) {
-        const data = await response.json()
-        if (data.incidents && data.incidents.length > 0) {
-          data.incidents.forEach((incident) => {
-            dispatch({
-              type: ActionTypes.ADD_INCIDENT,
-              payload: {
-                id: incident.id,
-                title: incident.title,
-                service: incident.service_name || incident.service || 'unknown',
-                severity: incident.severity,
-                status: incident.status,
-                createdAt: incident.created_at,
-                triage: incident.triage_classification
-                  ? { classification: incident.triage_classification }
-                  : undefined,
-                occurrenceCount: incident.occurrence_count || 1,
-              },
-            })
+    const addIncidents = (data) => {
+      if (data.incidents && data.incidents.length > 0) {
+        data.incidents.forEach((incident) => {
+          dispatch({
+            type: ActionTypes.ADD_INCIDENT,
+            payload: {
+              id: incident.id,
+              title: incident.title,
+              service: incident.service_name || incident.service || 'unknown',
+              severity: incident.severity,
+              status: incident.status,
+              createdAt: incident.created_at,
+              source: incident.source || 'gcp',
+              gchatMetadata: incident.gchat_metadata || null,
+              triage: incident.triage_classification
+                ? { classification: incident.triage_classification }
+                : undefined,
+              occurrenceCount: incident.occurrence_count || 1,
+            },
           })
-        }
+        })
       }
+    }
+
+    try {
+      // Fetch both sources in parallel
+      const [gcpRes, gchatRes] = await Promise.all([
+        fetch('/api/incidents'),
+        fetch('/api/incidents?source=gchat'),
+      ])
+      if (gcpRes.ok) addIncidents(await gcpRes.json())
+      if (gchatRes.ok) addIncidents(await gchatRes.json())
     } catch (error) {
       console.error('Failed to fetch incidents:', error)
     }

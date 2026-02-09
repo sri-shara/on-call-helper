@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useMemo } from 'react'
-import { IncidentProvider, useIncidents } from './context/IncidentContext'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { Routes, Route, NavLink, useLocation } from 'react-router-dom'
+import { useIncidents } from './context/IncidentContext'
 
 /**
  * Get display info for an incident status
@@ -306,35 +307,55 @@ function CodeBlock({ code, variant = 'neutral', maxHeight = '200px' }) {
  * Incident detail panel
  */
 function IncidentDetail({ incidentId }) {
-  const { updateIncident, refreshMetrics } = useIncidents()
+  const { updateIncident, refreshMetrics, incidents } = useIncidents()
   const [details, setDetails] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [resolving, setResolving] = useState(false)
+  const lastFetchedStatus = useRef(null)
 
-  useEffect(() => {
-    if (!incidentId) {
-      setDetails(null)
-      return
-    }
-
-    setLoading(true)
-    setError(null)
-
-    fetch(`/api/incidents/${incidentId}`)
+  // Fetch full details from API
+  const fetchDetails = useCallback((id) => {
+    if (!id) return
+    fetch(`/api/incidents/${id}`)
       .then(res => {
         if (!res.ok) throw new Error('Failed to load incident')
         return res.json()
       })
       .then(data => {
         setDetails(data)
+        lastFetchedStatus.current = data?.incident?.status || null
         setLoading(false)
       })
       .catch(err => {
         setError(err.message)
         setLoading(false)
       })
-  }, [incidentId])
+  }, [])
+
+  // Initial fetch when incident selection changes
+  useEffect(() => {
+    if (!incidentId) {
+      setDetails(null)
+      lastFetchedStatus.current = null
+      return
+    }
+    setLoading(true)
+    setError(null)
+    fetchDetails(incidentId)
+  }, [incidentId, fetchDetails])
+
+  // Re-fetch when the incident's status changes via WebSocket
+  const contextStatus = incidents[incidentId]?.status
+  useEffect(() => {
+    if (!incidentId || loading) return
+    // Only re-fetch if status actually changed from what we last fetched
+    // This prevents loops where stuck "triaging" incidents keep triggering re-fetches
+    if (contextStatus && contextStatus !== lastFetchedStatus.current) {
+      lastFetchedStatus.current = contextStatus
+      fetchDetails(incidentId)
+    }
+  }, [contextStatus]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleResolve = async () => {
     if (!incidentId || resolving) return
@@ -409,7 +430,19 @@ function IncidentDetail({ incidentId }) {
             <h2 className="text-lg font-semibold text-slate-100 truncate">
               {incident.service_name}
             </h2>
-            <p className="text-xs text-slate-500 font-mono mt-0.5">{incident.id}</p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <p className="text-xs text-slate-500 font-mono">{incident.id}</p>
+              {incident.source === 'gchat' && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400 font-medium">
+                  Google Chat
+                </span>
+              )}
+              {incident.gchat_metadata?.sender_name && (
+                <span className="text-[10px] text-slate-500">
+                  from {incident.gchat_metadata.sender_name}
+                </span>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-3 flex-shrink-0">
             {/* Resolve button - only show for needs_human or infra_issue that need manual resolution */}
@@ -747,6 +780,18 @@ function IncidentDetail({ incidentId }) {
                       {triage.manual_steps.map((step, i) => <li key={i}>{step}</li>)}
                     </ol>
                   )}
+                  {triage.gcloud_commands?.length > 0 && (
+                    <div className="mt-3">
+                      <h5 className="text-xs font-medium text-amber-300/70 mb-2">Diagnostic Commands</h5>
+                      <div className="space-y-1.5">
+                        {triage.gcloud_commands.map((cmd, i) => (
+                          <pre key={i} className="text-xs font-mono text-green-300/80 bg-slate-950 p-2 rounded border border-slate-700/50 overflow-x-auto whitespace-pre-wrap break-all">
+                            $ {cmd}
+                          </pre>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
               {triage.classification === 'needs_human' && (
@@ -762,6 +807,18 @@ function IncidentDetail({ incidentId }) {
                     <ol className="text-sm text-red-200/70 space-y-1 list-decimal list-inside">
                       {triage.manual_steps.map((step, i) => <li key={i}>{step}</li>)}
                     </ol>
+                  )}
+                  {triage.gcloud_commands?.length > 0 && (
+                    <div className="mt-3">
+                      <h5 className="text-xs font-medium text-red-300/70 mb-2">Diagnostic Commands</h5>
+                      <div className="space-y-1.5">
+                        {triage.gcloud_commands.map((cmd, i) => (
+                          <pre key={i} className="text-xs font-mono text-green-300/80 bg-slate-950 p-2 rounded border border-slate-700/50 overflow-x-auto whitespace-pre-wrap break-all">
+                            $ {cmd}
+                          </pre>
+                        ))}
+                      </div>
+                    </div>
                   )}
                 </>
               )}
@@ -801,14 +858,24 @@ function MetricPill({ label, value, color, isActive, onClick }) {
 /**
  * Main dashboard
  */
-function Dashboard() {
+function Dashboard({ source = 'gcp' }) {
   const { incidents, isConnected, metrics } = useIncidents()
   const [selectedIncidentId, setSelectedIncidentId] = useState(null)
   const [filter, setFilter] = useState('all')
+  const [timeWindow, setTimeWindow] = useState(null) // null = all time, or minutes (5, 15, 60, 180, 360)
   const [debugInfo, setDebugInfo] = useState({ apiError: null, lastFetch: null })
 
   const incidentList = useMemo(() => {
     let list = Object.values(incidents)
+
+    // Filter by source
+    list = list.filter(inc => (inc.source || 'gcp') === source)
+
+    // Apply time window filter
+    if (timeWindow) {
+      const cutoff = new Date(Date.now() - timeWindow * 60 * 1000)
+      list = list.filter(inc => new Date(inc.createdAt) >= cutoff)
+    }
 
     if (filter !== 'all') {
       list = list.filter(inc => {
@@ -838,52 +905,47 @@ function Dashboard() {
     }
 
     return list.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-  }, [incidents, filter])
+  }, [incidents, filter, timeWindow, source])
 
-  // Calculate accurate metrics from incidents
+  // Calculate accurate metrics from incidents (respects time window and source)
   const calculatedMetrics = useMemo(() => {
-    const list = Object.values(incidents)
+    let list = Object.values(incidents)
+
+    // Filter by source
+    list = list.filter(i => (i.source || 'gcp') === source)
+
+    if (timeWindow) {
+      const cutoff = new Date(Date.now() - timeWindow * 60 * 1000)
+      list = list.filter(i => new Date(i.createdAt) >= cutoff)
+    }
+
     const selfHealing = list.filter(i =>
       (i.triage?.classification || i.escalation?.classification) === 'transient'
     ).length
-    return { ...metrics, selfHealing }
-  }, [incidents, metrics])
+    const processing = list.filter(i =>
+      ['active', 'triaging', 'fixing', 'testing', 'reviewing', 'verifying'].includes(i.status)
+    ).length
+    const noAction = selfHealing
+    const review = list.filter(i => {
+      const cls = i.triage?.classification || i.escalation?.classification
+      return i.status === 'escalated' || cls === 'needs_human' || cls === 'infra_issue'
+    }).length
+    const prRaised = list.filter(i =>
+      i.status === 'fixed' || i.status === 'pr_created'
+    ).length
+
+    return {
+      total_incidents: list.length,
+      processing,
+      no_action_needed: noAction,
+      review_needed: review,
+      pr_raised: prRaised,
+      selfHealing,
+    }
+  }, [incidents, timeWindow, source])
 
   return (
-    <div className="h-screen bg-slate-900 text-white flex flex-col">
-      {/* Header */}
-      <header className="bg-slate-900 border-b border-slate-800 px-6 py-3 flex-shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
-              <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            </div>
-            <div>
-              <h1 className="text-sm font-semibold text-slate-100">On-Call Helper</h1>
-              <p className="text-[10px] text-slate-500">AI-Powered Incident Response</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-1 text-sm">
-              <MetricPill label="Total" value={metrics.total_incidents} isActive={filter === 'all'} onClick={() => setFilter('all')} />
-              <MetricPill label="Active" value={metrics.processing} color="blue" isActive={filter === 'processing'} onClick={() => setFilter('processing')} />
-              <MetricPill label="No Action" value={metrics.no_action_needed} color="slate" isActive={filter === 'no-action'} onClick={() => setFilter('no-action')} />
-              <MetricPill label="Review" value={metrics.review_needed} color="amber" isActive={filter === 'review'} onClick={() => setFilter('review')} />
-              <MetricPill label="Fixed" value={metrics.pr_raised} color="green" isActive={filter === 'pr-raised'} onClick={() => setFilter('pr-raised')} />
-            </div>
-
-            <div className="flex items-center gap-2 pl-3 border-l border-slate-800">
-              <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-              <span className="text-xs text-slate-500">
-                {isConnected ? 'Live' : 'Offline'}
-              </span>
-            </div>
-          </div>
-        </div>
-      </header>
+    <div className="h-full bg-slate-900 text-white flex flex-col">
 
       {/* Content */}
       <div className="flex-1 flex overflow-hidden">
@@ -912,14 +974,38 @@ function Dashboard() {
                 </button>
               ))}
             </div>
+            {/* Time window filter */}
+            <div className="flex items-center gap-1 mt-1.5">
+              <span className="text-[10px] text-slate-600 mr-0.5">Window:</span>
+              {[
+                { id: null, label: 'All' },
+                { id: 5, label: '5m' },
+                { id: 15, label: '15m' },
+                { id: 60, label: '1h' },
+                { id: 180, label: '3h' },
+                { id: 360, label: '6h' },
+              ].map(opt => (
+                <button
+                  key={opt.id ?? 'all'}
+                  onClick={() => setTimeWindow(opt.id)}
+                  className={`px-1.5 py-0.5 text-[10px] font-medium rounded transition-colors ${
+                    timeWindow === opt.id
+                      ? 'bg-blue-600/30 text-blue-300 border border-blue-500/40'
+                      : 'text-slate-500 hover:text-slate-300'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* List */}
           <div className="flex-1 overflow-y-auto">
             {incidentList.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-slate-500 px-4">
-                <p className="text-sm font-medium">No incidents to display</p>
-                <p className="text-xs text-slate-600 mt-1">Monitoring GCP logs...</p>
+                <p className="text-sm font-medium">No {source === 'gchat' ? 'chat cases' : 'incidents'} to display</p>
+                <p className="text-xs text-slate-600 mt-1">{source === 'gchat' ? 'Monitoring Google Chat...' : 'Monitoring GCP logs...'}</p>
                 {/* Debug info */}
                 <div className="mt-6 p-4 bg-slate-800/50 rounded-lg text-xs text-left max-w-md w-full">
                   <p className="font-semibold text-slate-400 mb-2">Debug Info:</p>
@@ -965,12 +1051,503 @@ function Dashboard() {
 }
 
 /**
- * App root
+ * Health check run list item
+ */
+function HealthCheckRunItem({ run, isSelected, onClick }) {
+  const statusConfig = {
+    running:   { dot: 'bg-blue-500 animate-pulse', label: 'Running', text: 'text-blue-400' },
+    completed: { dot: 'bg-emerald-500', label: 'Passed', text: 'text-emerald-400' },
+    failed:    { dot: 'bg-red-500', label: 'Failed', text: 'text-red-400' },
+    timeout:   { dot: 'bg-amber-500', label: 'Timeout', text: 'text-amber-400' },
+  }
+  const config = statusConfig[run.status] || statusConfig.failed
+
+  return (
+    <div
+      onClick={onClick}
+      className={`group px-3 py-2.5 cursor-pointer transition-all border-l-2 ${
+        isSelected
+          ? 'bg-slate-800/80 border-l-blue-500'
+          : 'border-l-transparent hover:bg-slate-800/40 hover:border-l-slate-600'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2 mb-0.5">
+        <div className="flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full flex-shrink-0 ${config.dot}`} />
+          <span className={`text-xs font-medium ${config.text}`}>{config.label}</span>
+        </div>
+        {run.duration_seconds != null && (
+          <span className="text-[10px] text-slate-500">{run.duration_seconds}s</span>
+        )}
+      </div>
+      <div className="text-[10px] text-slate-500 ml-4">
+        {new Date(run.started_at).toLocaleString()}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * On-Call Checkout page - health check history with live streaming
+ */
+function CheckoutPage() {
+  const [runs, setRuns] = useState([])
+  const [selectedRunId, setSelectedRunId] = useState(null)
+  const [selectedRunOutput, setSelectedRunOutput] = useState(null)
+  const [liveOutput, setLiveOutput] = useState('')
+  const [isRunning, setIsRunning] = useState(false)
+  const [loadingOutput, setLoadingOutput] = useState(false)
+  const [error, setError] = useState(null)
+  const [summary, setSummary] = useState(null)
+  const [summarizing, setSummarizing] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const outputRef = useRef(null)
+
+  // Fetch run history on mount
+  const fetchRuns = useCallback(async () => {
+    try {
+      const res = await fetch('/api/health-checks')
+      if (res.ok) {
+        const data = await res.json()
+        setRuns(data.runs)
+      }
+    } catch (e) {
+      console.error('Failed to fetch health check runs:', e)
+    }
+  }, [])
+
+  useEffect(() => { fetchRuns() }, [fetchRuns])
+
+  // Fetch a single historical run's output
+  const fetchRunOutput = useCallback(async (runId) => {
+    setLoadingOutput(true)
+    setSelectedRunOutput(null)
+    try {
+      const res = await fetch(`/api/health-checks/${runId}`)
+      if (res.ok) {
+        const data = await res.json()
+        setSelectedRunOutput(data)
+      }
+    } catch (e) {
+      console.error('Failed to fetch run output:', e)
+    } finally {
+      setLoadingOutput(false)
+    }
+  }, [])
+
+  // Auto-scroll during live streaming
+  const isViewingLive = isRunning && selectedRunId && runs.find(r => r.id === selectedRunId)?.status === 'running'
+  useEffect(() => {
+    if (isViewingLive && outputRef.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight
+    }
+  }, [liveOutput, isViewingLive])
+
+  // Trigger a new health check with SSE streaming
+  const runHealthCheck = useCallback(async () => {
+    if (isRunning) return
+    setIsRunning(true)
+    setLiveOutput('')
+    setSelectedRunOutput(null)
+    setError(null)
+
+    try {
+      const res = await fetch('/api/health-checks/run', { method: 'POST' })
+
+      if (res.status === 409) {
+        setError('Health check is already running')
+        setIsRunning(false)
+        return
+      }
+      if (!res.ok) {
+        const err = await res.json()
+        setError(err.error || 'Failed to start health check')
+        setIsRunning(false)
+        return
+      }
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const events = buffer.split('\n\n')
+        buffer = events.pop() // keep incomplete event in buffer
+
+        for (const eventText of events) {
+          if (!eventText.trim()) continue
+
+          const eventMatch = eventText.match(/^event:\s*(\w+)\ndata:\s*(.+)$/s)
+          if (!eventMatch) continue
+
+          const [, eventType, dataStr] = eventMatch
+          let data
+          try { data = JSON.parse(dataStr) } catch { continue }
+
+          if (eventType === 'metadata') {
+            setSelectedRunId(data.id)
+            setRuns(prev => [{
+              id: data.id,
+              started_at: data.started_at,
+              status: 'running',
+              completed_at: null,
+              exit_code: null,
+              duration_seconds: null,
+            }, ...prev])
+          } else if (eventType === 'output') {
+            setLiveOutput(prev => prev + data.line)
+          } else if (eventType === 'complete') {
+            setRuns(prev => prev.map(r =>
+              r.id === data.id
+                ? { ...r, status: data.status, exit_code: data.exit_code, duration_seconds: data.duration_seconds, completed_at: new Date().toISOString() }
+                : r
+            ))
+          } else if (eventType === 'error') {
+            setRuns(prev => prev.map(r =>
+              r.id === data.id ? { ...r, status: 'failed', completed_at: new Date().toISOString() } : r
+            ))
+            setError(data.message)
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Health check stream error:', e)
+      setError(e.message)
+    } finally {
+      setIsRunning(false)
+    }
+  }, [isRunning])
+
+  // Summarize a health check run
+  const summarizeRun = useCallback(async (runId) => {
+    setSummarizing(true)
+    setSummary(null)
+    setCopied(false)
+    try {
+      const res = await fetch(`/api/health-checks/${runId}/summarize`, { method: 'POST' })
+      if (res.ok) {
+        const data = await res.json()
+        setSummary(data.summary)
+      } else {
+        const err = await res.json()
+        setError(err.error || 'Failed to summarize')
+      }
+    } catch (e) {
+      console.error('Summarize failed:', e)
+      setError('Failed to summarize health check')
+    } finally {
+      setSummarizing(false)
+    }
+  }, [])
+
+  const copySummary = useCallback(() => {
+    if (!summary) return
+    navigator.clipboard.writeText(summary).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }, [summary])
+
+  // Clear summary when switching runs
+  useEffect(() => {
+    setSummary(null)
+    setCopied(false)
+  }, [selectedRunId])
+
+  // Determine what output to display in right panel
+  const displayOutput = isViewingLive ? liveOutput : (selectedRunOutput?.output || liveOutput || null)
+  const selectedRun = runs.find(r => r.id === selectedRunId)
+
+  return (
+    <div className="h-full bg-slate-900 text-white flex flex-col">
+      {/* Two-panel content */}
+      <div className="flex-1 flex overflow-hidden">
+
+        {/* Left panel: run history */}
+        <div className="w-96 border-r border-slate-800 flex flex-col bg-slate-900/50">
+          {/* Run button pinned at top */}
+          <div className="px-3 py-3 border-b border-slate-800">
+            <button
+              onClick={runHealthCheck}
+              disabled={isRunning}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed rounded-lg text-sm font-medium text-white transition-colors"
+            >
+              {isRunning ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  Running...
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  Run Health Check
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Run history list */}
+          <div className="flex-1 overflow-y-auto">
+            {runs.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-12 text-slate-500 px-4">
+                <p className="text-sm font-medium">No runs yet</p>
+                <p className="text-xs text-slate-600 mt-1">Click the button above to start</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-800/50">
+                {runs.map(run => (
+                  <HealthCheckRunItem
+                    key={run.id}
+                    run={run}
+                    isSelected={selectedRunId === run.id}
+                    onClick={() => {
+                      setSelectedRunId(run.id)
+                      setError(null)
+                      if (run.status !== 'running') {
+                        fetchRunOutput(run.id)
+                      }
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Right panel: output display */}
+        <div className="flex-1 bg-slate-900 flex flex-col">
+          {!selectedRunId ? (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-center">
+                <div className="text-4xl mb-3 opacity-30">&#128203;</div>
+                <p className="text-sm text-slate-500">Select a run to view output, or start a new health check</p>
+                <p className="text-xs text-slate-600 mt-1">Checks AlloyDB, Pub/Sub, Cloud Run, tenant activity, alert pipeline health</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Run info header */}
+              <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between flex-shrink-0">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-mono text-slate-400">{selectedRunId}</span>
+                  {selectedRun && (
+                    <div className="flex items-center gap-1.5">
+                      <div className={`w-2 h-2 rounded-full ${
+                        selectedRun.status === 'running' ? 'bg-blue-500 animate-pulse' :
+                        selectedRun.status === 'completed' ? 'bg-emerald-500' :
+                        selectedRun.status === 'timeout' ? 'bg-amber-500' : 'bg-red-500'
+                      }`} />
+                      <span className="text-xs text-slate-400">
+                        {selectedRun.status === 'running' ? 'Running...' :
+                         selectedRun.status === 'completed' ? 'Passed' :
+                         selectedRun.status === 'timeout' ? 'Timeout' : 'Failed'}
+                        {selectedRun.duration_seconds != null && ` in ${selectedRun.duration_seconds}s`}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                {selectedRun && selectedRun.status !== 'running' && (
+                  <button
+                    onClick={() => summarizeRun(selectedRunId)}
+                    disabled={summarizing}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:bg-violet-600/50 disabled:cursor-not-allowed rounded-md text-xs font-medium text-white transition-colors"
+                  >
+                    {summarizing ? (
+                      <>
+                        <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        Summarizing...
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        Summarize
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+
+              {/* Terminal output */}
+              <div className="flex-1 overflow-auto p-4" ref={outputRef}>
+                {error && (
+                  <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 mb-3">
+                    <p className="text-xs text-red-400">{error}</p>
+                  </div>
+                )}
+
+                {summary && (
+                  <div className="bg-violet-500/10 border border-violet-500/30 rounded-lg p-4 mb-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-medium text-violet-300">Summary for Google Chat</span>
+                      <button
+                        onClick={copySummary}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-violet-600 hover:bg-violet-500 rounded text-xs font-medium text-white transition-colors"
+                      >
+                        {copied ? (
+                          <>
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                            Copied!
+                          </>
+                        ) : (
+                          <>
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                            </svg>
+                            Copy
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <pre className="text-xs text-slate-200 whitespace-pre-wrap break-words font-sans leading-relaxed">{summary}</pre>
+                  </div>
+                )}
+
+                {loadingOutput ? (
+                  <div className="flex items-center justify-center h-full">
+                    <div className="w-6 h-6 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
+                  </div>
+                ) : displayOutput ? (
+                  <pre className="bg-slate-950 p-4 rounded-lg text-xs font-mono text-green-300/80 whitespace-pre-wrap break-words border border-slate-800">
+                    {displayOutput}
+                    {isViewingLive && <span className="animate-pulse text-green-400">|</span>}
+                  </pre>
+                ) : !isViewingLive && selectedRun?.status !== 'running' ? (
+                  <div className="flex items-center justify-center h-full">
+                    <p className="text-xs text-slate-500">No output available</p>
+                  </div>
+                ) : null}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Navigation bar with page switching
+ */
+function NavBar() {
+  const { incidents, isConnected } = useIncidents()
+  const location = useLocation()
+  const source = location.pathname === '/gchat' ? 'gchat' : 'gcp'
+
+  const stats = useMemo(() => {
+    const list = Object.values(incidents).filter(i => (i.source || 'gcp') === source)
+    const selfHealing = list.filter(i =>
+      (i.triage?.classification || i.escalation?.classification) === 'transient'
+    ).length
+    const processing = list.filter(i =>
+      ['active', 'triaging', 'fixing', 'testing', 'reviewing', 'verifying'].includes(i.status)
+    ).length
+    const review = list.filter(i => {
+      const cls = i.triage?.classification || i.escalation?.classification
+      return i.status === 'escalated' || cls === 'needs_human' || cls === 'infra_issue'
+    }).length
+    const fixed = list.filter(i =>
+      i.status === 'fixed' || i.status === 'pr_created'
+    ).length
+    return { total: list.length, processing, noAction: selfHealing, review, fixed }
+  }, [incidents, source])
+
+  return (
+    <nav className="bg-slate-950/80 backdrop-blur-md border-b border-slate-800/60 px-5 py-2.5 flex items-center justify-between shrink-0">
+      <div className="flex items-center gap-5">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-pink-500/20 to-purple-600/20 ring-1 ring-pink-400/30 flex items-center justify-center shadow-lg shadow-pink-500/10">
+            <img src="/oncall-logo.png" alt="On-Call Helper" className="w-8 h-8 object-contain" />
+          </div>
+          <div className="flex flex-col">
+            <span className="text-sm font-bold text-slate-100 tracking-tight">On-Call Helper</span>
+            <span className="text-[10px] text-slate-500 font-medium">AI Incident Response</span>
+          </div>
+        </div>
+        <div className="h-6 w-px bg-slate-800" />
+        <div className="flex items-center gap-0.5">
+          <NavLink
+            to="/"
+            end
+            className={({ isActive }) =>
+              `px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all duration-150 ${
+                isActive
+                  ? 'bg-slate-800 text-white shadow-sm shadow-slate-900/50'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+              }`
+            }
+          >
+            GCP Incidents
+          </NavLink>
+          <NavLink
+            to="/gchat"
+            className={({ isActive }) =>
+              `px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all duration-150 ${
+                isActive
+                  ? 'bg-slate-800 text-white shadow-sm shadow-slate-900/50'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+              }`
+            }
+          >
+            Chat Cases
+          </NavLink>
+          <NavLink
+            to="/checkout"
+            className={({ isActive }) =>
+              `px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all duration-150 ${
+                isActive
+                  ? 'bg-slate-800 text-white shadow-sm shadow-slate-900/50'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+              }`
+            }
+          >
+            Health Check
+          </NavLink>
+        </div>
+      </div>
+      <div className="flex items-center gap-3 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="text-slate-400 tabular-nums"><span className="font-semibold text-slate-300">{stats.total}</span> Total</span>
+          <span className="text-slate-600">|</span>
+          <span className="text-slate-400 tabular-nums"><span className="font-semibold text-blue-400">{stats.processing}</span> Active</span>
+          <span className="text-slate-400 tabular-nums"><span className="font-semibold text-slate-300">{stats.noAction}</span> No Action</span>
+          <span className="text-slate-400 tabular-nums"><span className="font-semibold text-amber-400">{stats.review}</span> Review</span>
+          <span className="text-slate-400 tabular-nums"><span className="font-semibold text-emerald-400">{stats.fixed}</span> Fixed</span>
+        </div>
+        <div className="h-4 w-px bg-slate-800" />
+        <div className="flex items-center gap-1.5">
+          <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+          <span className="text-slate-500">{isConnected ? 'Live' : 'Offline'}</span>
+        </div>
+      </div>
+    </nav>
+  )
+}
+
+/**
+ * App root with routing
  */
 export default function App() {
   return (
-    <IncidentProvider>
-      <Dashboard />
-    </IncidentProvider>
+    <div className="h-screen flex flex-col bg-slate-900">
+      <NavBar />
+      <div className="flex-1 overflow-hidden">
+        <Routes>
+          <Route path="/" element={<Dashboard source="gcp" />} />
+          <Route path="/gchat" element={<Dashboard source="gchat" />} />
+          <Route path="/checkout" element={<CheckoutPage />} />
+        </Routes>
+      </div>
+    </div>
   )
 }
