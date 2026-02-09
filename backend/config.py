@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     gcp_auto_poll: bool = Field(True, description="Auto-start GCP polling on backend startup")
     gcp_poll_interval: int = Field(30, description="GCP polling interval in seconds")
 
+    # ═══════════════ Google Chat ═══════════════
+    gchat_space_id: str = Field("spaces/AAQAS1B8MTQ", description="Google Chat space ID to monitor")
+    gchat_verify_token: bool = Field(False, description="Verify Google Chat JWT tokens")
+    gchat_auto_poll: bool = Field(False, description="Auto-start Google Chat polling on backend startup")
+    gchat_poll_interval: int = Field(30, description="Google Chat polling interval in seconds")
+    gchat_credentials_path: str = Field("", description="Path to service account JSON for Chat API (empty = ADC)")
+
     # ═══════════════ GitHub ═══════════════
     github_token: str = Field("", description="GitHub personal access token")
     github_repo: str = Field("", description="Target repo (owner/repo)")

@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Headphone band -->
+  <path d="M13 32 Q13 12 32 10 Q51 12 51 32" stroke="#1a1a1a" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M14 32 Q14 13 32 11 Q50 13 50 32" stroke="#e8a0bf" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="M16 31 Q16 16 32 13 Q48 16 48 31" stroke="#f5c6d8" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+  <!-- Left ear cup -->
+  <rect x="7" y="26" width="10" height="15" rx="4" fill="#1a1a1a"/>
+  <rect x="8" y="27" width="8" height="13" rx="3.5" fill="#e8a0bf" stroke="#c97a9e" stroke-width="0.5"/>
+  <rect x="10" y="29" width="3" height="9" rx="1.5" fill="#f5c6d8"/>
+  <!-- Right ear cup -->
+  <rect x="47" y="26" width="10" height="15" rx="4" fill="#1a1a1a"/>
+  <rect x="48" y="27" width="8" height="13" rx="3.5" fill="#e8a0bf" stroke="#c97a9e" stroke-width="0.5"/>
+  <rect x="51" y="29" width="3" height="9" rx="1.5" fill="#f5c6d8"/>
+  <!-- Skull outline -->
+  <path d="M32 15 C19 15 14 24 14 33 C14 39 17 43 21 45 L21 50 C21 51 22 52 23 52 L41 52 C42 52 43 51 43 50 L43 45 C47 43 50 39 50 33 C50 24 45 15 32 15Z" fill="#1a1a1a"/>
+  <!-- Skull shape -->
+  <path d="M32 16 C20 16 16 24 16 33 C16 38 19 42 22 44 L22 49 C22 50 23 51 24 51 L40 51 C41 51 42 50 42 49 L42 44 C45 42 48 38 48 33 C48 24 44 16 32 16Z" fill="#f0a8c8"/>
+  <!-- Skull lighter area -->
+  <path d="M32 18 C23 18 19 25 19 33 C19 34 19 35 19.2 36" stroke="#f8d0e0" stroke-width="1.5" fill="none" stroke-linecap="round" opacity="0.5"/>
+  <!-- Forehead highlight -->
+  <ellipse cx="28" cy="22" rx="3" ry="1.5" fill="#f8d0e0" opacity="0.6"/>
+  <!-- Forehead crease -->
+  <path d="M28 26 L32 24 L36 26" stroke="#d68aab" stroke-width="1" fill="none" stroke-linecap="round"/>
+  <!-- Left eye socket -->
+  <path d="M22 31 C22 27.5 25.5 26 28 27.5 C30.5 29 30.5 33 28 34.5 C25.5 36 22 34.5 22 31Z" fill="#1a1a1a"/>
+  <!-- Right eye socket -->
+  <path d="M42 31 C42 27.5 38.5 26 36 27.5 C33.5 29 33.5 33 36 34.5 C38.5 36 42 34.5 42 31Z" fill="#1a1a1a"/>
+  <!-- Nose -->
+  <path d="M30.5 36 L29.5 39.5 L32 39 L34.5 39.5 L33.5 36Z" fill="#1a1a1a"/>
+  <!-- Jaw outline -->
+  <path d="M22 44 L22 49 C22 50 23 51 24 51 L40 51 C41 51 42 50 42 49 L42 44" stroke="#d68aab" stroke-width="0.6" fill="none"/>
+  <!-- Teeth -->
+  <rect x="23" y="44" width="3.2" height="4.5" rx="0.5" fill="#f8d0e0" stroke="#1a1a1a" stroke-width="0.6"/>
+  <rect x="26.8" y="44" width="3.2" height="4.5" rx="0.5" fill="#f8d0e0" stroke="#1a1a1a" stroke-width="0.6"/>
+  <rect x="30.4" y="44" width="3.2" height="4.5" rx="0.5" fill="#f8d0e0" stroke="#1a1a1a" stroke-width="0.6"/>
+  <rect x="34" y="44" width="3.2" height="4.5" rx="0.5" fill="#f8d0e0" stroke="#1a1a1a" stroke-width="0.6"/>
+  <rect x="37.6" y="44" width="3.2" height="4.5" rx="0.5" fill="#f8d0e0" stroke="#1a1a1a" stroke-width="0.6"/>
+</svg>

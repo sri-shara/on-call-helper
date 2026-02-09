@@ -30,6 +30,8 @@ class Storage:
         self._test_results: Dict[str, TestResult] = {}
         self._verification_results: Dict[str, VerificationResult] = {}
 
+        self._health_check_runs: Dict[str, Any] = {}
+
         # Deduplication tracking
         self._seen_gcp_insert_ids: Set[str] = set()
 
@@ -65,15 +67,25 @@ class Storage:
                 self._total_resolution_time_ms += int(delta.total_seconds() * 1000)
         return incident
 
+    def find_incident_by_gchat_thread(self, thread_id: str) -> Optional[Incident]:
+        """Find an active gchat incident by thread ID."""
+        for inc in self._incidents.values():
+            if inc.source == "gchat" and inc.gchat_metadata and inc.gchat_metadata.get("thread_id") == thread_id:
+                return inc
+        return None
+
     def list_incidents(
         self,
         status: Optional[IncidentStatus] = None,
+        source: Optional[str] = None,
         limit: int = 100
     ) -> List[Incident]:
-        """List incidents, optionally filtered by status."""
+        """List incidents, optionally filtered by status and/or source."""
         incidents = list(self._incidents.values())
         if status:
             incidents = [i for i in incidents if i.status == status]
+        if source:
+            incidents = [i for i in incidents if i.source == source]
         # Sort by created_at descending (handle mixed timezone-aware/naive datetimes)
         def sort_key(i):
             dt = i.created_at
@@ -108,6 +120,15 @@ class Storage:
         return False
 
     # ═══════════════ Triage Results ═══════════════
+
+    def get_triage_classifications_batch(self, incident_ids: List[str], source: Optional[str] = None) -> Dict[str, str]:
+        """Batch-fetch triage classifications for multiple incidents."""
+        results = {}
+        for iid in incident_ids:
+            triage = self._triage_results.get(iid)
+            if triage:
+                results[iid] = triage.classification.value
+        return results
 
     def save_triage_result(self, result: TriageResult) -> None:
         """Save a triage result."""
@@ -149,9 +170,11 @@ class Storage:
 
     # ═══════════════ Metrics ═══════════════
 
-    def get_metrics(self) -> Metrics:
-        """Calculate and return current metrics."""
+    def get_metrics(self, source: Optional[str] = None) -> Metrics:
+        """Calculate and return current metrics, optionally filtered by source."""
         incidents = list(self._incidents.values())
+        if source:
+            incidents = [i for i in incidents if i.source == source]
 
         processing = 0
         no_action_needed = 0
@@ -199,6 +222,32 @@ class Storage:
             mttr_seconds=mttr_seconds,
         )
 
+    # ═══════════════ Health Check Runs ═══════════════
+
+    def save_health_check_run(self, run) -> None:
+        """Save a health check run and prune to last 50."""
+        self._health_check_runs[run.id] = run
+        if len(self._health_check_runs) > 50:
+            sorted_runs = sorted(
+                self._health_check_runs.values(),
+                key=lambda r: r.started_at,
+                reverse=True,
+            )
+            self._health_check_runs = {r.id: r for r in sorted_runs[:50]}
+
+    def list_health_check_runs(self, limit: int = 50) -> list:
+        """List recent health check runs (newest first)."""
+        runs = sorted(
+            self._health_check_runs.values(),
+            key=lambda r: r.started_at,
+            reverse=True,
+        )
+        return runs[:limit]
+
+    def get_health_check_run(self, run_id: str):
+        """Get a single health check run by ID."""
+        return self._health_check_runs.get(run_id)
+
     # ═══════════════ Utility ═══════════════
 
     def clear(self) -> None:
@@ -209,6 +258,7 @@ class Storage:
         self._test_results.clear()
         self._verification_results.clear()
         self._seen_gcp_insert_ids.clear()
+        self._health_check_runs.clear()
         self._total_resolution_time_ms = 0
 
 

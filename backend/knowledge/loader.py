@@ -212,9 +212,13 @@ You must respond with a JSON object containing your analysis:
     "code_snippet": "problematic code excerpt",
     "suggested_fix": "high-level description of fix needed",
 
-    // For INFRA_ISSUE classification:
-    "runbook_reference": "runbooks/alloydb.md",
-    "manual_steps": ["step 1", "step 2"],
+    // For INFRA_ISSUE and NEEDS_HUMAN classifications:
+    "runbook_reference": "runbooks/alloydb.md - Scenario 7: Entity Upsert Lock Contention",
+    "manual_steps": ["step 1 explaining what to check and why", "step 2"],
+    "gcloud_commands": [
+        "gcloud monitoring time-series list --project=nucleus-449303 --filter='metric.type=...'",
+        "SELECT pid, state, query FROM pg_stat_activity WHERE state != 'idle'"
+    ],
 
     // For all classifications:
     "related_context": ["additional observations"]
@@ -239,10 +243,12 @@ You must respond with a JSON object containing your analysis:
    - What pattern indicates it's transient
    - What the user should monitor
    - When they should escalate if it persists
-10. **For INFRA_ISSUE**: Always provide:
+10. **For INFRA_ISSUE and NEEDS_HUMAN**: Always provide:
     - The specific infrastructure component affected
-    - The runbook or manual steps to investigate
-    - What metrics or logs to watch
+    - The runbook section that applies (with scenario number if applicable)
+    - Manual steps that explain what to check and why
+    - **gcloud_commands**: Copy-paste-ready gcloud CLI commands and/or SQL queries from the runbooks for diagnosis and mitigation. These should be actual commands the on-call engineer can run immediately.
+    - What metrics or logs to watch after applying the fix
 '''
 
 

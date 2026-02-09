@@ -16,6 +16,7 @@ from .incident import (
     FixRecord,
     PatternRecord,
     PatternSuggestion,
+    HealthCheckRun,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "FixRecord",
     "PatternRecord",
     "PatternSuggestion",
+    "HealthCheckRun",
 ]

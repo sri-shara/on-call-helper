@@ -192,6 +192,7 @@ def _extract_service_name(log_entry: Dict[str, Any]) -> str:
         "service_name",
         "service",
         "container_name",
+        "namespace_name",
         "job_name",
         "function_name",
         "module_id",
@@ -215,17 +216,76 @@ def _extract_service_name(log_entry: Dict[str, Any]) -> str:
         if key in json_payload and json_payload[key]:
             return str(json_payload[key])
 
-    # From log name
+    # From log name (only if it's a meaningful service name, not a GCP API)
     log_name = log_entry.get("logName", "")
-    # Format: projects/{project}/logs/{log_name}
     if "/logs/" in log_name:
         log_name_part = log_name.split("/logs/")[-1]
-        # Clean up URL encoding
         log_name_part = log_name_part.replace("%2F", "/").replace("%3A", ":")
-        # Extract meaningful part
         parts = log_name_part.split("/")
         if parts and parts[0]:
-            return parts[0]
+            # Skip GCP infrastructure log names — these aren't useful service names
+            if not parts[0].endswith('.googleapis.com'):
+                return parts[0]
+
+    # From protoPayload or jsonPayload containing audit log data
+    # Note: _parse_log_entry_direct converts protobuf payloads to jsonPayload,
+    # so audit log fields (authenticationInfo, resourceName) may be in jsonPayload
+    for payload_key in ("protoPayload", "jsonPayload"):
+        payload = log_entry.get(payload_key, {})
+        if not payload or not isinstance(payload, dict):
+            continue
+
+        # Service account email often contains the app service name
+        auth_info = payload.get("authenticationInfo", {})
+        if isinstance(auth_info, dict):
+            principal = auth_info.get("principalEmail", "")
+            if "@" in principal and "iam.gserviceaccount.com" in principal:
+                sa_name = principal.split("@")[0]
+                # Skip GCP system service accounts (service-NUMBERS@...)
+                if sa_name and sa_name != "unknown" and not re.match(r'^service-\d+$', sa_name):
+                    return sa_name
+
+        # Custom metric paths: custom.googleapis.com/nucleus/alertservice/...
+        resource_name = payload.get("resourceName", "")
+        if resource_name:
+            match = re.search(r'custom\.googleapis\.com/nucleus/([^/]+)', resource_name)
+            if match:
+                return match.group(1)
+
+        req = payload.get("request", {})
+        if isinstance(req, dict):
+            req_name = req.get("name", "")
+            if req_name:
+                match = re.search(r'custom\.googleapis\.com/nucleus/([^/]+)', req_name)
+                if match:
+                    return match.group(1)
+
+    # From error message text — extract Nucleus service names
+    error_msg = log_entry.get("textPayload", "")
+    if not error_msg:
+        jp = log_entry.get("jsonPayload", {})
+        if isinstance(jp, dict):
+            error_msg = json.dumps(jp)
+
+    if error_msg:
+        # Pattern: "service": "alertpropertyextractor-prod"
+        match = re.search(r'"service"\s*:\s*"([^"]+)"', error_msg)
+        if match and not match.group(1).endswith('.googleapis.com'):
+            return match.group(1)
+
+        # Pattern: user=nucleus-manager-prod@project.iam.gserviceaccount.com
+        # Also matches: user=nucleus-manager-prod@project-id.iam (AlloyDB IAM auth)
+        match = re.search(r'user=([^@\s]+)@[\w.-]*\.iam(?:\.gserviceaccount\.com)?(?:\s|$)', error_msg)
+        if match:
+            sa_name = match.group(1)
+            # Skip GCP system service accounts (service-NUMBERS, etc.)
+            if not re.match(r'^service-\d+$', sa_name):
+                return sa_name
+
+        # Pattern: namespace references in k8s errors
+        match = re.search(r'namespace[s]?[=:/]\s*"?([a-z][\w-]+)"?', error_msg, re.IGNORECASE)
+        if match and match.group(1) not in ('default', 'kube-system', 'kube-public'):
+            return match.group(1)
 
     # From resource type as last resort
     resource_type = resource.get("type", "")
@@ -448,6 +508,17 @@ class GCPLoggingService:
                     log_dict["textPayload"] = entry.payload
                 elif isinstance(entry.payload, dict):
                     log_dict["jsonPayload"] = entry.payload
+                else:
+                    # Handle protobuf Struct and other dict-like payloads
+                    # (google.protobuf.struct_pb2.Struct from k8s_container logs)
+                    try:
+                        from google.protobuf.json_format import MessageToDict
+                        log_dict["jsonPayload"] = MessageToDict(entry.payload)
+                    except (ImportError, AttributeError, TypeError):
+                        try:
+                            log_dict["jsonPayload"] = dict(entry.payload)
+                        except (TypeError, ValueError):
+                            log_dict["textPayload"] = str(entry.payload)
 
             # Extract tenant info
             tenant_id, tenant_name = _extract_tenant_info(log_dict)
