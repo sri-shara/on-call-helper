@@ -38,7 +38,7 @@
 
 const CONFIG = {
   // Your On-Call Helper webhook URL
-  WEBHOOK_URL: "https://vegetation-recorded-organizations-hopefully.trycloudflare.com/webhook/gchat",
+  WEBHOOK_URL: "https://proprietary-interim-photography-pcs.trycloudflare.com/webhook/gchat",
 
   // Google Chat space ID to monitor
   SPACE_ID: "spaces/AAQAS1B8MTQ",
