@@ -358,7 +358,8 @@ class FirestoreStorage:
         """Batch-fetch triage classifications for multiple incidents at once.
 
         Uses Firestore get_all() for a single round-trip instead of N individual reads.
-        Returns a dict mapping incident_id -> classification value.
+        Returns a dict mapping incident_id -> {"classification": str, "service_name": str|None}.
+        For backwards compat, values can also be just a string (classification).
         """
         if not incident_ids:
             return {}
@@ -374,7 +375,10 @@ class FirestoreStorage:
                     data = doc.to_dict()
                     classification = data.get("classification")
                     if classification:
-                        results[doc.id] = classification
+                        results[doc.id] = {
+                            "classification": classification,
+                            "service_name": data.get("service_name"),
+                        }
             return results
         except Exception as e:
             logger.error(f"Failed to batch-fetch triage classifications: {e}")

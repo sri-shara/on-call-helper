@@ -117,6 +117,9 @@ export function IncidentProvider({ children }) {
             source: data.source || 'gcp',
             stages: [],
             occurrenceCount: data.occurrence_count || 1,
+            gcpLogName: data.gcp_log_name || null,
+            gcpResourceType: data.gcp_resource_type || null,
+            gchatMetadata: data.gchat_metadata || null,
           },
         })
         break
@@ -128,6 +131,7 @@ export function IncidentProvider({ children }) {
           payload: {
             id: data.incident_id,
             status: type === 'triage_complete' ? 'triaged' : 'triaging',
+            ...(type === 'triage_complete' && data.service_name ? { service: data.service_name } : {}),
             triage: type === 'triage_complete' ? {
               classification: data.classification,
               confidence: data.confidence,
@@ -313,6 +317,8 @@ export function IncidentProvider({ children }) {
               createdAt: incident.created_at,
               source: incident.source || 'gcp',
               gchatMetadata: incident.gchat_metadata || null,
+              gcpLogName: incident.gcp_log_name || null,
+              gcpResourceType: incident.gcp_resource_type || null,
               triage: incident.triage_classification
                 ? { classification: incident.triage_classification }
                 : undefined,

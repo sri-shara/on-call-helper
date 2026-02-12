@@ -295,6 +295,10 @@ class PipelineOrchestrator:
                     s["service"] for s in result.gcp_context["similar_across_services"]
                 ]
 
+        # Include service name if triage identified one
+        if result.service_name:
+            triage_data["service_name"] = result.service_name
+
         # Include actionable info for non-fixable classifications
         if result.classification == TriageClassification.INFRA_ISSUE:
             if result.runbook_reference:
@@ -313,6 +317,12 @@ class PipelineOrchestrator:
 
         # Persist triage result to storage
         storage.save_triage_result(result)
+
+        # Update incident service_name if triage identified one and current is "unknown"
+        if result.service_name and incident.service_name in ("unknown", "Unknown"):
+            incident.service_name = result.service_name
+            storage.save_incident(incident)
+            logger.info(f"Updated service_name for {incident.id}: unknown -> {result.service_name}")
 
         # Record pattern for learning
         try:
