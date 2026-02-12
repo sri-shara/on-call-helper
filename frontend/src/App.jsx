@@ -149,6 +149,51 @@ function cleanTitle(title, service) {
 }
 
 /**
+ * Build a GCP Cloud Logging console URL from log name.
+ * gcp_log_name format: "projects/PROJECT_ID/logs/LOG_NAME"
+ */
+function buildCloudLoggingUrl(gcpLogName, gcpResourceType) {
+  if (!gcpLogName) return null
+  const match = gcpLogName.match(/^projects\/([^/]+)\/logs\/(.+)$/)
+  if (!match) return null
+  const [, projectId] = match
+  const query = `resource.type="${gcpResourceType || 'cloud_run_revision'}"\nlogName="${gcpLogName}"`
+  return `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(query)}?project=${projectId}`
+}
+
+/**
+ * Build a Cloud Logging search URL from a service name (for GChat incidents)
+ */
+function buildServiceLoggingUrl(serviceName) {
+  if (!serviceName || serviceName === 'unknown') return null
+  const svcName = serviceName.endsWith('-prod') ? serviceName : `${serviceName}-prod`
+  const query = `resource.type="cloud_run_revision"\nresource.labels.service_name="${svcName}"\nseverity>=ERROR`
+  return `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(query)};timeRange=PT1H?project=nucleus-449303`
+}
+
+/**
+ * Small external link icon for Cloud Logging
+ */
+function CloudLoggingLink({ gcpLogName, gcpResourceType, loggingUrl, serviceName }) {
+  const url = loggingUrl || buildCloudLoggingUrl(gcpLogName, gcpResourceType) || buildServiceLoggingUrl(serviceName)
+  if (!url) return null
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      title="View in Cloud Logging"
+      className="inline-flex items-center text-blue-400/70 hover:text-blue-400 transition-colors"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+      </svg>
+    </a>
+  )
+}
+
+/**
  * Section header component
  */
 function SectionHeader({ children }) {
@@ -167,6 +212,7 @@ function IncidentListItem({ incident, isSelected, onClick }) {
   const classification = incident.triage?.classification || incident.escalation?.classification
   const serviceName = shortServiceName(incident.service)
   const title = cleanTitle(incident.title, incident.service)
+  const isAnalyzing = !classification && ['active', 'triaging'].includes(incident.status)
 
   return (
     <div
@@ -181,9 +227,16 @@ function IncidentListItem({ incident, isSelected, onClick }) {
       <div className="flex items-center justify-between gap-2 mb-1">
         <div className="flex items-center gap-2 min-w-0">
           <SeverityDot severity={incident.severity} />
-          <span className="text-sm font-medium text-slate-200 truncate">
-            {serviceName}
-          </span>
+          {isAnalyzing ? (
+            <span className="flex items-center gap-1.5 text-sm text-slate-400 italic">
+              <span className="w-3 h-3 border border-blue-500/40 border-t-blue-400 rounded-full animate-spin flex-shrink-0" />
+              Analyzing...
+            </span>
+          ) : (
+            <span className="text-sm font-medium text-slate-200 truncate">
+              {serviceName}
+            </span>
+          )}
           {incident.occurrenceCount > 1 && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-medium flex-shrink-0">
               ×{incident.occurrenceCount}
@@ -198,11 +251,12 @@ function IncidentListItem({ incident, isSelected, onClick }) {
       </div>
       {/* Error message preview */}
       <p className="text-xs text-slate-400 truncate mb-1.5 ml-4">
-        {title}
+        {isAnalyzing ? 'Waiting for triage...' : title}
       </p>
       {/* Metadata row */}
       <div className="flex items-center gap-1.5 ml-4 text-[10px] text-slate-600">
         <span className="font-mono">{incident.id?.slice(0, 12)}</span>
+        <CloudLoggingLink gcpLogName={incident.gcpLogName} gcpResourceType={incident.gcpResourceType} loggingUrl={incident.gchatMetadata?.logging_url} serviceName={incident.service} />
         <span>·</span>
         <span className="text-slate-500">{timeAgo(incident.createdAt)}</span>
       </div>
@@ -307,11 +361,12 @@ function CodeBlock({ code, variant = 'neutral', maxHeight = '200px' }) {
  * Incident detail panel
  */
 function IncidentDetail({ incidentId }) {
-  const { updateIncident, refreshMetrics, incidents } = useIncidents()
+  const { incidents } = useIncidents()
   const [details, setDetails] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [resolving, setResolving] = useState(false)
+  const [feedbackSending, setFeedbackSending] = useState(false)
+  const [feedbackSent, setFeedbackSent] = useState(false)
   const lastFetchedStatus = useRef(null)
 
   // Fetch full details from API
@@ -325,6 +380,7 @@ function IncidentDetail({ incidentId }) {
       .then(data => {
         setDetails(data)
         lastFetchedStatus.current = data?.incident?.status || null
+        if (data?.incident?.feedback_given) setFeedbackSent(true)
         setLoading(false)
       })
       .catch(err => {
@@ -342,6 +398,7 @@ function IncidentDetail({ incidentId }) {
     }
     setLoading(true)
     setError(null)
+    setFeedbackSent(false)
     fetchDetails(incidentId)
   }, [incidentId, fetchDetails])
 
@@ -357,33 +414,18 @@ function IncidentDetail({ incidentId }) {
     }
   }, [contextStatus]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleResolve = async () => {
-    if (!incidentId || resolving) return
+  const handleNotNeedsHuman = async () => {
+    if (!incidentId || feedbackSending || feedbackSent) return
 
-    setResolving(true)
+    setFeedbackSending(true)
     try {
-      const res = await fetch(`/api/incidents/${incidentId}/resolve`, { method: 'POST' })
-      if (!res.ok) throw new Error('Failed to resolve incident')
-
-      console.log('Resolving incident:', incidentId)
-
-      // Update local detail state
-      setDetails(prev => ({
-        ...prev,
-        incident: { ...prev.incident, status: 'fixed' }
-      }))
-
-      // Update the incident in the list (context state)
-      updateIncident(incidentId, { status: 'fixed' })
-      console.log('Updated incident status to fixed')
-
-      // Refresh metrics from server
-      await refreshMetrics()
-      console.log('Metrics refreshed')
+      const res = await fetch(`/api/incidents/${incidentId}/feedback/not-needs-human`, { method: 'POST' })
+      if (!res.ok) console.error('Feedback API returned', res.status)
     } catch (err) {
-      console.error('Failed to resolve:', err)
+      console.error('Failed to send feedback:', err)
     } finally {
-      setResolving(false)
+      setFeedbackSending(false)
+      setFeedbackSent(true)
     }
   }
 
@@ -432,6 +474,7 @@ function IncidentDetail({ incidentId }) {
             </h2>
             <div className="flex items-center gap-2 mt-0.5">
               <p className="text-xs text-slate-500 font-mono">{incident.id}</p>
+              <CloudLoggingLink gcpLogName={incident.gcp_log_name} gcpResourceType={incident.gcp_resource_type} loggingUrl={incident.gchat_metadata?.logging_url} serviceName={incident.service_name} />
               {incident.source === 'gchat' && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400 font-medium">
                   Google Chat
@@ -445,28 +488,30 @@ function IncidentDetail({ incidentId }) {
             </div>
           </div>
           <div className="flex items-center gap-3 flex-shrink-0">
-            {/* Resolve button - only show for needs_human or infra_issue that need manual resolution */}
-            {incident.status !== 'fixed' &&
-             (triage?.classification === 'needs_human' || triage?.classification === 'infra_issue') && (
-              <button
-                onClick={handleResolve}
-                disabled={resolving}
-                className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
-              >
-                {resolving ? (
-                  <>
-                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Resolving...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                    Mark Resolved
-                  </>
-                )}
-              </button>
+            {incident.status === 'escalated' && triage?.classification !== 'transient' && (
+              feedbackSent ? (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600/20 border border-emerald-500/30 rounded-lg text-xs font-medium text-emerald-400">
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  Feedback Recorded
+                </span>
+              ) : (
+                <button
+                  onClick={handleNotNeedsHuman}
+                  disabled={feedbackSending}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs font-medium text-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {feedbackSending ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin" />
+                      Sending...
+                    </>
+                  ) : (
+                    'Does Not Need Human Review'
+                  )}
+                </button>
+              )
             )}
             <StatusBadge
               status={incident.status}
@@ -1443,6 +1488,7 @@ function NavBar() {
   const { incidents, isConnected } = useIncidents()
   const location = useLocation()
   const source = location.pathname === '/gchat' ? 'gchat' : 'gcp'
+  const [showPrank, setShowPrank] = useState(false)
 
   const stats = useMemo(() => {
     const list = Object.values(incidents).filter(i => (i.source || 'gcp') === source)
@@ -1463,6 +1509,7 @@ function NavBar() {
   }, [incidents, source])
 
   return (
+    <>
     <nav className="bg-slate-950/80 backdrop-blur-md border-b border-slate-800/60 px-5 py-2.5 flex items-center justify-between shrink-0">
       <div className="flex items-center gap-5">
         <div className="flex items-center gap-3">
@@ -1529,8 +1576,46 @@ function NavBar() {
           <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
           <span className="text-slate-500">{isConnected ? 'Live' : 'Offline'}</span>
         </div>
+        <div className="h-4 w-px bg-slate-800" />
+        <button
+          onClick={() => setShowPrank(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-slate-400 hover:text-yellow-300 hover:bg-slate-800/40 transition-all duration-150"
+          title="Switch to Light Mode"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="5"/>
+            <line x1="12" y1="1" x2="12" y2="3"/>
+            <line x1="12" y1="21" x2="12" y2="23"/>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+            <line x1="1" y1="12" x2="3" y2="12"/>
+            <line x1="21" y1="12" x2="23" y2="12"/>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+          </svg>
+          Light Mode
+        </button>
       </div>
     </nav>
+    {showPrank && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowPrank(false)}>
+        <div
+          className="relative bg-pink-500 text-white rounded-2xl p-10 shadow-2xl shadow-pink-500/40 max-w-md mx-4 text-center transform animate-bounce"
+          onClick={e => e.stopPropagation()}
+          style={{ animationIterationCount: 3, animationDuration: '0.5s' }}
+        >
+          <button onClick={() => setShowPrank(false)} className="absolute top-3 right-4 text-white/70 hover:text-white text-xl font-bold">&times;</button>
+          <div className="text-5xl font-black mb-4 tracking-tight">SIKEEEEE!!!</div>
+          <div className="text-lg font-semibold">Sorry Venki, the site doesn't support light mode.</div>
+          <div className="mt-6">
+            <button onClick={() => setShowPrank(false)} className="px-6 py-2 bg-white text-pink-600 font-bold rounded-lg hover:bg-pink-100 transition-colors">
+              OK fine 😤
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   )
 }
 

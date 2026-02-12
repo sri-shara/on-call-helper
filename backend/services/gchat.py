@@ -41,6 +41,7 @@ class ParsedAlert(BaseModel):
     file_path: Optional[str] = None
     tenant_name: Optional[str] = None
     environment: str = "production"
+    logging_url: Optional[str] = None
 
 
 def parse_gchat_event(data: Dict[str, Any]) -> GChatEvent:
@@ -113,6 +114,42 @@ def _extract_field(text: str, keys: list) -> Optional[str]:
     return None
 
 
+def _extract_service_from_alert(text: str) -> Optional[str]:
+    """Try to extract a service name from common GCP monitoring alert patterns."""
+    t = text.lower()
+
+    # Pattern: "Cloud Run Revision with {configuration_name=SERVICE-prod"
+    m = re.search(r'configuration_name\s*[=:]\s*(\S+?)(?:-prod|-staging|-dev)?\s*[},\s]', text, re.IGNORECASE)
+    if m:
+        return m.group(1).rstrip('-')
+
+    # Pattern: "for Cloud Run Revision ... revision_name=SERVICE-prod-XXXXX"
+    m = re.search(r'revision_name\s*[=:]\s*(\S+?)(?:-prod|-staging|-dev)', text, re.IGNORECASE)
+    if m:
+        return m.group(1).rstrip('-')
+
+    # Known alert name patterns
+    alert_service_map = {
+        "secops integration errors": "secops-integration",
+        "pubsub unacked messages": "pubsub",
+        "slo processing": "sloprocessor",
+        "hawkeye": "hawkeye",
+    }
+    for pattern, svc in alert_service_map.items():
+        if pattern in t:
+            return svc
+
+    # Pattern: "SERVICE-prod" in the text (common Cloud Run naming)
+    m = re.search(r'\b([a-z][a-z0-9]+(?:-[a-z0-9]+)*)-prod\b', text)
+    if m:
+        name = m.group(1)
+        # Skip generic/infrastructure names
+        if name not in ('cloud-run', 'cloud-sql', 'nucleus', 'gke', 'prod'):
+            return name
+
+    return None
+
+
 def parse_alert_text(text: str) -> ParsedAlert:
     """Parse structured alert text from chat message into ParsedAlert.
 
@@ -130,6 +167,10 @@ def parse_alert_text(text: str) -> ParsedAlert:
     tenant = _extract_field(text, ["Tenant", "Customer", "Org", "Organization"])
     env = _extract_field(text, ["Environment", "Env"])
     title_field = _extract_field(text, ["Title", "Summary", "Subject", "Alert Name"])
+
+    # Extract Cloud Logging URL from message text
+    logging_url_match = re.search(r'https://console\.cloud\.google\.com/logs[^\s<>")\]]*', text)
+    logging_url = logging_url_match.group(0) if logging_url_match else None
 
     # Build title
     lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
@@ -165,6 +206,10 @@ def parse_alert_text(text: str) -> ParsedAlert:
     # Parse severity
     severity = _parse_severity(severity_str) if severity_str else Severity.MEDIUM
 
+    # Fallback: extract service name from common GCP alert patterns
+    if not service:
+        service = _extract_service_from_alert(text)
+
     return ParsedAlert(
         title=title,
         error_message=error_message,
@@ -174,6 +219,7 @@ def parse_alert_text(text: str) -> ParsedAlert:
         file_path=file_path,
         tenant_name=tenant,
         environment=env or "production",
+        logging_url=logging_url,
     )
 
 
@@ -199,5 +245,6 @@ def create_incident_from_gchat(event: GChatEvent, alert: ParsedAlert) -> Inciden
             "sender_name": event.sender_name,
             "sender_type": event.sender_type,
             "space_name": event.space_name,
+            "logging_url": alert.logging_url,
         },
     )

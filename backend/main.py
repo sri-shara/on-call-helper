@@ -337,6 +337,7 @@ async def list_incidents(status: Optional[str] = None, source: Optional[str] = N
     loop = asyncio.get_event_loop()
 
     def _fetch_incidents_with_triage():
+        from backend.services.gchat import _extract_service_from_alert
         incidents = storage.list_incidents(status=status_filter, source=source, limit=limit)
         # Batch-fetch all triage classifications in one Firestore call
         incident_ids = [inc.id for inc in incidents]
@@ -344,9 +345,20 @@ async def list_incidents(status: Optional[str] = None, source: Optional[str] = N
         incident_list = []
         for inc in incidents:
             inc_data = inc.model_dump()
-            classification = triage_map.get(inc.id)
-            if classification:
-                inc_data["triage_classification"] = classification
+            triage_info = triage_map.get(inc.id)
+            if triage_info:
+                if isinstance(triage_info, dict):
+                    inc_data["triage_classification"] = triage_info["classification"]
+                    # Use triage service_name when incident's is "unknown"
+                    if inc_data.get("service_name") in ("unknown", "Unknown") and triage_info.get("service_name"):
+                        inc_data["service_name"] = triage_info["service_name"]
+                else:
+                    inc_data["triage_classification"] = triage_info
+            # Last resort: extract service from title/error_message text
+            if inc_data.get("service_name") in ("unknown", "Unknown"):
+                extracted = _extract_service_from_alert(inc_data.get("title", "") + " " + inc_data.get("error_message", ""))
+                if extracted:
+                    inc_data["service_name"] = extracted
             incident_list.append(inc_data)
         return incident_list
 
@@ -374,8 +386,13 @@ async def get_incident(incident_id: str):
     test = storage.get_test_result(incident_id)
     verification = storage.get_verification_result(incident_id)
 
+    inc_data = incident.model_dump()
+    # Use triage service_name when incident's is "unknown"
+    if triage and inc_data.get("service_name") in ("unknown", "Unknown") and triage.service_name:
+        inc_data["service_name"] = triage.service_name
+
     return {
-        "incident": incident.model_dump(),
+        "incident": inc_data,
         "triage": triage.model_dump() if triage else None,
         "fix": fix.model_dump() if fix else None,
         "test": test.model_dump() if test else None,
@@ -422,9 +439,14 @@ async def get_all_incidents_with_details(status: Optional[str] = None, source: O
                 "verification": None,
             }
             # Add classification from batch lookup
-            classification = triage_map.get(incident.id)
-            if classification:
-                inc_data["incident"]["triage_classification"] = classification
+            triage_info = triage_map.get(incident.id)
+            if triage_info:
+                if isinstance(triage_info, dict):
+                    inc_data["incident"]["triage_classification"] = triage_info["classification"]
+                    if inc_data["incident"].get("service_name") in ("unknown", "Unknown") and triage_info.get("service_name"):
+                        inc_data["incident"]["service_name"] = triage_info["service_name"]
+                else:
+                    inc_data["incident"]["triage_classification"] = triage_info
             result.append(inc_data)
 
         return result
@@ -480,6 +502,53 @@ async def resolve_incident(incident_id: str):
         "status": "resolved",
         "incident_id": incident_id,
         "message": f"Incident {incident_id} marked as resolved",
+    }
+
+
+@app.post("/incidents/{incident_id}/feedback/not-needs-human", tags=["Incidents"])
+async def feedback_not_needs_human(incident_id: str):
+    """
+    Submit feedback that this incident does not actually need human review.
+
+    Records a 'fixable' classification in the pattern learning system to shift
+    future incidents with similar error signatures away from 'needs_human'.
+    """
+    from backend.knowledge import get_pattern_learner
+
+    incident = storage.get_incident(incident_id)
+    if not incident:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Incident not found: {incident_id}"}
+        )
+
+    try:
+        pattern_learner = get_pattern_learner(storage)
+        pattern_id = pattern_learner.record_incident(
+            incident_id=incident.id,
+            error_msg=incident.error_message,
+            service=incident.service_name,
+            classification="fixable"
+        )
+        # Persist feedback on the incident so it survives page reloads
+        incident.feedback_given = "not_needs_human"
+        storage.save_incident(incident)
+        logger.info(
+            f"Feedback recorded for {incident_id}: not-needs-human -> fixable "
+            f"(pattern: {pattern_id})"
+        )
+    except Exception as e:
+        logger.error(f"Failed to record feedback for {incident_id}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to record feedback: {str(e)}"}
+        )
+
+    return {
+        "status": "feedback_recorded",
+        "incident_id": incident_id,
+        "pattern_id": pattern_id,
+        "message": f"Feedback recorded: incident {incident_id} does not need human review",
     }
 
 
@@ -785,6 +854,8 @@ async def receive_gcp_logs(request: Request):
             title=incident.title,
             service=incident.service_name,
             severity=incident.severity.value,
+            gcp_log_name=incident.gcp_log_name,
+            gcp_resource_type=incident.gcp_resource_type,
         )
 
         # Trigger pipeline processing in background
@@ -893,6 +964,7 @@ async def receive_gchat_message(request: Request):
         service=incident.service_name,
         severity=incident.severity.value,
         source="gchat",
+        gchat_metadata=incident.gchat_metadata,
     )
 
     # Run triage pipeline in background
@@ -986,6 +1058,8 @@ async def test_webhook(request: Request):
         title=incident.title,
         service=incident.service_name,
         severity=incident.severity.value,
+        gcp_log_name=incident.gcp_log_name,
+        gcp_resource_type=incident.gcp_resource_type,
     )
 
     # Trigger pipeline processing in background
@@ -1414,6 +1488,8 @@ async def _start_gcp_polling_internal(interval_seconds: int = 30):
             title=incident.title,
             service=incident.service_name,
             severity=incident.severity.value,
+            gcp_log_name=incident.gcp_log_name,
+            gcp_resource_type=incident.gcp_resource_type,
         )
 
         # 8. Run triage pipeline
@@ -1519,6 +1595,7 @@ async def _start_gchat_polling_internal(interval_seconds: int = 30):
             service=incident.service_name,
             severity=incident.severity.value,
             source="gchat",
+            gchat_metadata=incident.gchat_metadata,
         )
 
         # Run triage pipeline in background

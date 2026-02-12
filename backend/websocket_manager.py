@@ -255,18 +255,25 @@ class WebSocketManager:
         service: str,
         severity: str,
         source: str = "gcp",
+        gcp_log_name: str = None,
+        gcp_resource_type: str = None,
+        gchat_metadata: dict = None,
     ) -> int:
         """Broadcast incident created event."""
-        return await self.broadcast(
-            EventType.INCIDENT_CREATED,
-            {
-                "incident_id": incident_id,
-                "title": title,
-                "service": service,
-                "severity": severity,
-                "source": source,
-            },
-        )
+        data = {
+            "incident_id": incident_id,
+            "title": title,
+            "service": service,
+            "severity": severity,
+            "source": source,
+        }
+        if gcp_log_name:
+            data["gcp_log_name"] = gcp_log_name
+        if gcp_resource_type:
+            data["gcp_resource_type"] = gcp_resource_type
+        if gchat_metadata:
+            data["gchat_metadata"] = gchat_metadata
+        return await self.broadcast(EventType.INCIDENT_CREATED, data)
 
     async def broadcast_triage_complete(
         self,

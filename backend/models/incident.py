@@ -92,6 +92,9 @@ class Incident(BaseModel):
     source: str = Field("gcp", description="Incident source: 'gcp' or 'gchat'")
     gchat_metadata: Optional[Dict[str, Any]] = Field(None, description="Google Chat metadata: space_id, thread_id, message_id, sender")
 
+    # Feedback tracking
+    feedback_given: Optional[str] = Field(None, description="User feedback: 'not_needs_human' etc.")
+
     class Config:
         json_encoders = {datetime: lambda v: v.isoformat()}
 

@@ -127,7 +127,10 @@ class Storage:
         for iid in incident_ids:
             triage = self._triage_results.get(iid)
             if triage:
-                results[iid] = triage.classification.value
+                results[iid] = {
+                    "classification": triage.classification.value,
+                    "service_name": triage.service_name,
+                }
         return results
 
     def save_triage_result(self, result: TriageResult) -> None:
