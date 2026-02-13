@@ -1488,7 +1488,6 @@ function NavBar() {
   const { incidents, isConnected } = useIncidents()
   const location = useLocation()
   const source = location.pathname === '/gchat' ? 'gchat' : 'gcp'
-  const [showPrank, setShowPrank] = useState(false)
 
   const stats = useMemo(() => {
     const list = Object.values(incidents).filter(i => (i.source || 'gcp') === source)
@@ -1576,45 +1575,8 @@ function NavBar() {
           <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
           <span className="text-slate-500">{isConnected ? 'Live' : 'Offline'}</span>
         </div>
-        <div className="h-4 w-px bg-slate-800" />
-        <button
-          onClick={() => setShowPrank(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-slate-400 hover:text-yellow-300 hover:bg-slate-800/40 transition-all duration-150"
-          title="Switch to Light Mode"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="5"/>
-            <line x1="12" y1="1" x2="12" y2="3"/>
-            <line x1="12" y1="21" x2="12" y2="23"/>
-            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
-            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-            <line x1="1" y1="12" x2="3" y2="12"/>
-            <line x1="21" y1="12" x2="23" y2="12"/>
-            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
-            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-          </svg>
-          Light Mode
-        </button>
       </div>
     </nav>
-    {showPrank && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowPrank(false)}>
-        <div
-          className="relative bg-pink-500 text-white rounded-2xl p-10 shadow-2xl shadow-pink-500/40 max-w-md mx-4 text-center transform animate-bounce"
-          onClick={e => e.stopPropagation()}
-          style={{ animationIterationCount: 3, animationDuration: '0.5s' }}
-        >
-          <button onClick={() => setShowPrank(false)} className="absolute top-3 right-4 text-white/70 hover:text-white text-xl font-bold">&times;</button>
-          <div className="text-5xl font-black mb-4 tracking-tight">SIKEEEEE!!!</div>
-          <div className="text-lg font-semibold">Sorry Venki, the site doesn't support light mode.</div>
-          <div className="mt-6">
-            <button onClick={() => setShowPrank(false)} className="px-6 py-2 bg-white text-pink-600 font-bold rounded-lg hover:bg-pink-100 transition-colors">
-              OK fine 😤
-            </button>
-          </div>
-        </div>
-      </div>
-    )}
     </>
   )
 }
