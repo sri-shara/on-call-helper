@@ -23,9 +23,9 @@ Complete documentation of all features and functionality in the On Call Helper a
 
 On Call Helper is an autonomous incident response system that:
 
-1. **Monitors** GCP Cloud Logging for production errors
+1. **Monitors** GCP Cloud Logging and Google Chat alert channels for production errors
 2. **Filters** noise (K8s infrastructure, demo tenants, transient errors)
-3. **Triages** incidents using Claude AI with embedded SRE knowledge
+3. **Triages** incidents using Claude AI (via Vertex AI or Anthropic API) with embedded SRE knowledge
 4. **Learns** from historical patterns to improve classification
 5. **Generates** targeted code fixes for fixable bugs
 6. **Reviews** fixes using CodeRabbit (optional)
@@ -394,6 +394,138 @@ Pattern Learning improves triage accuracy by learning from historical incidents.
 
 ---
 
+## Google Chat Integration
+
+### Overview
+
+On Call Helper can monitor a Google Chat space for alert messages forwarded by GCP alerting policies.
+
+**Location:** `backend/services/gchat.py`, `backend/services/gchat_poller.py`
+
+### Architecture
+
+```
+Google Chat Space → Apps Script Relay → Cloudflare Tunnel → Backend Webhook
+                                                              (/webhook/gchat)
+```
+
+### Message Parsing (`gchat.py`)
+
+The `ParsedAlert` model extracts structured data from alert text:
+- `title` - Alert title
+- `service_name` - Extracted via pattern matching (configuration_name, revision_name, alert title mapping)
+- `error_message` - Alert body text
+- `severity` - Mapped from alert content
+- `logging_url` - Cloud Logging URL if present in message text
+
+### Service Name Extraction
+
+The `_extract_service_from_alert()` function uses multiple strategies:
+1. `configuration_name` field extraction (Cloud Run services)
+2. `revision_name` field extraction
+3. Alert name mapping (e.g., "secops integration errors" → secops-integration)
+4. Generic `SERVICE-prod` pattern matching
+5. Fallback enrichment at API response time
+
+### GChat Polling (`gchat_poller.py`)
+
+Alternative to the Apps Script relay - polls the Google Chat API directly:
+- Configurable polling interval
+- Tracks processed message IDs for deduplication
+- Start/stop via API endpoints
+
+### Apps Script Relay (`scripts/gchat-relay.gs`)
+
+Google Apps Script that:
+1. Polls the Google Chat API for new messages in a configured space
+2. Forwards messages to the backend webhook via HTTP POST
+3. Requires a public URL (Cloudflare tunnel) to reach the local backend
+
+---
+
+## Vertex AI Support
+
+### Overview
+
+On Call Helper supports two AI backends for Claude access:
+
+**Location:** `backend/ai_client.py`
+
+### AI Client Factory
+
+The `create_ai_client()` function creates the appropriate client:
+
+| Setting | Client | Authentication |
+|---------|--------|---------------|
+| `USE_VERTEX=true` | `AnthropicVertex` | GCP Application Default Credentials |
+| `USE_VERTEX=false` | `Anthropic` | `ANTHROPIC_API_KEY` environment variable |
+
+Both clients have identical `messages.create()` interfaces.
+
+### Model Names
+
+| Backend | Triage Model | Fixer Model |
+|---------|-------------|-------------|
+| Vertex AI | `claude-sonnet-4-5@20250929` | `claude-sonnet-4-5@20250929` |
+| Anthropic | `claude-sonnet-4-20250514` | `claude-sonnet-4-20250514` |
+
+### Helper Functions
+
+- `get_triage_model()` - Returns appropriate model name for current backend
+- `get_fixer_model()` - Returns appropriate model name for current backend
+- `get_backend_name()` - Returns human-readable backend description
+
+---
+
+## Cloud Logging Links
+
+### Overview
+
+Each incident displays a clickable link icon that opens GCP Cloud Logging in the browser.
+
+### URL Construction Priority
+
+1. **Direct URL** - `logging_url` extracted from GChat message text
+2. **GCP Log Name** - Built from `gcp_log_name` field (format: `projects/PROJECT/logs/LOG_NAME`)
+3. **Service Name Search** - Constructs a search URL using the service name (for GChat incidents)
+
+### Implementation
+
+- `buildCloudLoggingUrl(gcpLogName, gcpResourceType)` - Builds URL from GCP log metadata
+- `buildServiceLoggingUrl(serviceName)` - Builds search URL from service name
+- `CloudLoggingLink` component - Blue link icon with fallback chain
+
+---
+
+## Analyzing State
+
+### Overview
+
+New incidents show an "Analyzing..." state with a spinner while triage is in progress.
+
+### Behavior
+
+- When `classification` is not yet set and status is `active` or `triaging`:
+  - Service name shows "Analyzing..." with a spinning indicator
+  - Error title shows "Waiting for triage..."
+- When `triage_complete` WebSocket event arrives, the card updates to show real data
+
+---
+
+## Feedback Persistence
+
+### Overview
+
+Operators can provide feedback on escalated incidents (e.g., "Does not need human review"). This feedback is persisted in Firestore.
+
+### Implementation
+
+- `feedback_given` field on the Incident model
+- `POST /incidents/{id}/feedback` endpoint saves feedback
+- Frontend initializes button state from persisted `feedback_given` value on load
+
+---
+
 ## Services
 
 ### Error Aggregator
@@ -651,6 +783,7 @@ Pattern Learning improves triage accuracy by learning from historical incidents.
 | `/incidents/{id}` | GET | Full incident with all results |
 | `/incidents/all/details` | GET | All incidents with complete data |
 | `/incidents/{id}/resolve` | POST | Manually mark as resolved |
+| `/incidents/{id}/feedback` | POST | Submit feedback on incident |
 
 ### History & Analytics
 
@@ -674,6 +807,7 @@ Pattern Learning improves triage accuracy by learning from historical incidents.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/webhook/gcp-logs` | POST | GCP Pub/Sub push endpoint |
+| `/webhook/gchat` | POST | Google Chat alert webhook |
 | `/webhook/test` | POST | Test incident simulation |
 
 ### GCP Polling
@@ -683,6 +817,14 @@ Pattern Learning improves triage accuracy by learning from historical incidents.
 | `/gcp/polling/start` | POST | Start polling |
 | `/gcp/polling/stop` | POST | Stop polling |
 | `/gcp/polling/status` | GET | Current status |
+
+### Google Chat Polling
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/gchat/polling/start` | POST | Start GChat polling |
+| `/gchat/polling/stop` | POST | Stop GChat polling |
+| `/gchat/polling/status` | GET | Current GChat polling status |
 
 ### WebSocket
 
@@ -709,15 +851,25 @@ Pattern Learning improves triage accuracy by learning from historical incidents.
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `host` | "0.0.0.0" | Bind address |
-| `port` | 8000 | Listen port |
+| `port` | 8080 | Listen port |
 
-### AI Models
+### AI Models - Anthropic API (default)
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| `anthropic_api_key` | - | Anthropic API key |
 | `triage_model` | claude-sonnet-4-20250514 | Triage model |
 | `fixer_model` | claude-sonnet-4-20250514 | Fixer model |
-| `anthropic_api_key` | - | Anthropic API key |
+
+### AI Models - Vertex AI (alternative)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `use_vertex` | false | Use Vertex AI instead of Anthropic API |
+| `vertex_project_id` | - | GCP project for Vertex AI |
+| `vertex_region` | us-east5 | Vertex AI region |
+| `vertex_triage_model` | claude-sonnet-4-5@20250929 | Vertex triage model |
+| `vertex_fixer_model` | claude-sonnet-4-5@20250929 | Vertex fixer model |
 
 ### GCP
 
@@ -728,6 +880,16 @@ Pattern Learning improves triage accuracy by learning from historical incidents.
 | `gcp_log_filter` | "severity>=ERROR" | Log query filter |
 | `gcp_auto_poll` | true | Auto-start polling |
 | `gcp_poll_interval` | 30 | Polling interval (seconds) |
+
+### Google Chat
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `gchat_space_id` | - | Google Chat space ID to monitor |
+| `gchat_auto_poll` | false | Auto-start GChat polling |
+| `gchat_poll_interval` | 30 | Polling interval (seconds) |
+| `gchat_credentials_path` | - | Service account JSON path (empty = ADC) |
+| `gchat_verify_token` | false | Verify Google Chat JWT tokens |
 
 ### GitHub
 

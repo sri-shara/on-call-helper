@@ -10,14 +10,17 @@ A standalone AI-powered incident response agent that monitors the Nucleus MDR pl
 
 ### ✅ Fully Implemented
 - **Error Ingestion**: GCP Cloud Logging integration (webhook + polling modes)
+- **Google Chat Integration**: GChat alert channel monitoring via Apps Script relay + webhook
+- **Vertex AI Support**: Claude via Vertex AI (GCP-native) or direct Anthropic API
 - **Filtering**: Transient error filter (20+ patterns) and tenant filter (explicit lists)
 - **Triage Agent**: Claude AI with embedded SRE knowledge + GCP context fetching
 - **Fixer Agent**: Code fix generation with fuzzy matching and local file reading
 - **GitHub Integration**: PR creation via `git` + `gh` CLI
 - **WebSocket Manager**: Real-time event broadcasting to dashboard
 - **Storage**: In-memory storage (with optional Firestore backend)
-- **Frontend**: React dashboard with real-time updates
+- **Frontend**: React dashboard with real-time updates, Cloud Logging links, analyzing state
 - **Orchestrator**: Full pipeline coordination with error handling
+- **Feedback System**: Persistent operator feedback on escalated incidents
 
 ### ⚠️ Optional Features (Can Be Skipped)
 - **CodeRabbit Review**: Code review integration (skips if not installed)
@@ -26,10 +29,13 @@ A standalone AI-powered incident response agent that monitors the Nucleus MDR pl
 - **PagerDuty**: Team notifications (optional)
 
 ### 📊 Key Metrics
+- **AI Backend**: Vertex AI (recommended) or Anthropic API
 - **Storage Backend**: In-memory (default) or Firestore (optional)
 - **GCP Integration**: Webhook (Pub/Sub push) or Polling (API queries)
+- **GChat Integration**: Apps Script relay or direct polling
 - **Source Code**: Reads from local Nucleus repository filesystem
 - **PR Creation**: Uses `git` commands + GitHub CLI (`gh`)
+- **Default Ports**: Backend 8080, Frontend 5173
 
 ---
 
@@ -114,6 +120,11 @@ A standalone AI-powered incident response agent that monitors the Nucleus MDR pl
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                         GCP CLOUD LOGGING (Nucleus Infra)                        │
 │  Errors from: Cloud Run services, AlloyDB, Pub/Sub processors, API-proxy        │
+└────────────────────────────────────┬────────────────────────────────────────────┘
+                                     │
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    GOOGLE CHAT ALERT CHANNEL (via Apps Script Relay)              │
+│  Alerts from: GCP alerting policies, monitoring notifications                    │
 └────────────────────────────────────┬────────────────────────────────────────────┘
                                      │
                                      ▼
@@ -228,6 +239,7 @@ on-call-helper/
 ├── backend/
 │   ├── main.py                     # ✅ FastAPI app, routes, WebSocket endpoint
 │   ├── config.py                   # ✅ Environment configuration (Pydantic Settings)
+│   ├── ai_client.py                # ✅ AI client factory (Anthropic / Vertex AI)
 │   ├── websocket_manager.py        # ✅ Connection management, event broadcasting
 │   ├── storage.py                  # ✅ In-memory storage (with Firestore option)
 │   ├── storage_firestore.py        # ✅ Optional Firestore backend
@@ -239,22 +251,36 @@ on-call-helper/
 │   │   └── fixer.py                # ✅ Claude fix generation (local file reading)
 │   ├── services/
 │   │   ├── gcp_logging.py          # ✅ GCP log ingestion (webhook + polling)
+│   │   ├── gchat.py                # ✅ Google Chat message parsing & service extraction
+│   │   ├── gchat_poller.py         # ✅ Google Chat polling service
 │   │   ├── coderabbit.py           # ✅ Code review via CLI (optional)
 │   │   ├── sandbox.py              # ⚠️ Kind cluster management (can be skipped)
 │   │   ├── github.py               # ✅ PR creation (git + gh CLI)
 │   │   ├── pagerduty.py            # ✅ Team notifications (optional)
+│   │   ├── error_aggregator.py     # ✅ Error deduplication
 │   │   └── production_monitor.py   # ✅ Post-deploy verification (can be skipped)
 │   ├── filters/
 │   │   ├── transient.py            # ✅ Self-healing error filter (20+ patterns)
-│   │   └── tenant.py               # ✅ Demo tenant filter (explicit tenant list)
+│   │   ├── tenant.py               # ✅ Demo tenant filter (explicit tenant list)
+│   │   └── service_filter.py       # ✅ K8s noise filtering
 │   └── knowledge/
 │       ├── __init__.py
-│       └── loader.py               # ✅ Load knowledge from oncall repo (cached)
+│       ├── loader.py               # ✅ Load knowledge from oncall repo (cached)
+│       ├── error_patterns.py       # ✅ Known error patterns (47+)
+│       ├── infrastructure.py       # ✅ GCP health checks
+│       ├── tenants.py              # ✅ Tenant classification
+│       ├── runbooks.py             # ✅ Runbook suggestions
+│       └── pattern_learner.py      # ✅ Historical pattern learning
 ├── frontend/
 │   └── src/
+│       ├── App.jsx                 # ✅ Dashboard UI (NavBar, IncidentList, Detail)
 │       ├── hooks/useWebSocket.js   # ✅ WebSocket with auto-reconnect
 │       ├── context/IncidentContext.jsx  # ✅ Global state management
 │       └── components/             # ✅ Dashboard UI components
+├── scripts/
+│   ├── setup.sh                    # Development environment setup
+│   ├── demo.sh                     # Demo script
+│   └── gchat-relay.gs              # ✅ Google Apps Script relay for GChat
 ├── sandbox/
 │   ├── kind-config.yaml            # Kind cluster configuration
 │   ├── deploy.sh                   # Deploy Nucleus to Kind
@@ -266,9 +292,10 @@ on-call-helper/
 │   ├── test_sandbox.py             # ✅ Tests
 │   └── ...                         # Additional test files
 ├── requirements.txt               # ✅ Python dependencies
-├── package.json                   # ✅ Frontend dependencies
 ├── Dockerfile                      # ✅ Backend container
 ├── docker-compose.yaml             # ✅ Docker Compose setup
+├── SETUP.md                        # Detailed setup guide
+├── FUNCTIONALITY.md                # Feature documentation
 └── ARCHITECTURE.md                 # This file
 ```
 
@@ -314,7 +341,7 @@ gcloud logging sinks create oncall-helper-sink \
 gcloud auth application-default login
 
 # Start polling via API
-curl -X POST "http://localhost:8001/gcp/polling/start?interval_seconds=30"
+curl -X POST "http://localhost:8080/gcp/polling/start?interval_seconds=30"
 ```
 
 **Webhook Endpoint** (`/webhook/gcp-logs`):
@@ -1432,15 +1459,27 @@ All settings use Pydantic Settings with environment variable loading:
 ```bash
 # .env
 
-# ═══════════════ AI ═══════════════
-ANTHROPIC_API_KEY=sk-ant-...
-TRIAGE_MODEL=claude-sonnet-4-20250514
-FIXER_MODEL=claude-sonnet-4-20250514
+# ═══════════════ AI - Vertex AI (recommended) ═══════════════
+USE_VERTEX=true
+VERTEX_PROJECT_ID=your-vertex-project
+VERTEX_REGION=us-east5
+VERTEX_TRIAGE_MODEL=claude-sonnet-4-5@20250929
+VERTEX_FIXER_MODEL=claude-sonnet-4-5@20250929
+
+# ═══════════════ AI - Anthropic API (alternative) ═══════════════
+# ANTHROPIC_API_KEY=sk-ant-...
+# TRIAGE_MODEL=claude-sonnet-4-20250514
+# FIXER_MODEL=claude-sonnet-4-20250514
 
 # ═══════════════ GCP ═══════════════
 GCP_PROJECT_ID=your-nucleus-project
 GCP_CREDENTIALS_PATH=./credentials.json  # Optional (uses ADC if not set)
 GCP_LOG_FILTER=severity>=ERROR
+
+# ═══════════════ Google Chat ═══════════════
+GCHAT_SPACE_ID=spaces/YOUR_SPACE_ID
+GCHAT_AUTO_POLL=false
+GCHAT_POLL_INTERVAL=30
 
 # ═══════════════ GitHub ═══════════════
 GITHUB_TOKEN=ghp_...  # For gh CLI authentication
@@ -1471,8 +1510,8 @@ APP_VERSION=0.1.0
 DEBUG=false
 LOG_LEVEL=INFO
 HOST=0.0.0.0
-PORT=8000
-DASHBOARD_URL=http://localhost:3000
+PORT=8080
+DASHBOARD_URL=http://localhost:5173
 ```
 
 **Configuration Features**:
@@ -1527,11 +1566,16 @@ DASHBOARD_URL=http://localhost:3000
 
 **Fully Working**:
 - ✅ GCP error ingestion (webhook + polling)
+- ✅ Google Chat alert monitoring (Apps Script relay + webhook)
+- ✅ Vertex AI and Anthropic API support
 - ✅ Transient and tenant filtering
 - ✅ AI-powered triage with SRE knowledge
 - ✅ Code fix generation
 - ✅ GitHub PR creation
 - ✅ Real-time dashboard with WebSocket updates
+- ✅ Cloud Logging links (GCP and GChat incidents)
+- ✅ Analyzing state for in-progress triage
+- ✅ Operator feedback persistence
 - ✅ Metrics tracking (MTTR, success rate)
 
 **Optional Features** (can be skipped):

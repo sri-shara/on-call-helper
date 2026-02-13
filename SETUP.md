@@ -9,11 +9,13 @@ Complete guide for setting up and using On Call Helper to monitor your Nucleus p
 3. [Configuration](#configuration)
 4. [Running the Application](#running-the-application)
 5. [GCP Cloud Logging Setup](#gcp-cloud-logging-setup)
-6. [Firestore Setup](#firestore-setup)
-7. [Pattern Learning](#pattern-learning)
-8. [Using the Dashboard](#using-the-dashboard)
-9. [API Reference](#api-reference)
-10. [Troubleshooting](#troubleshooting)
+6. [Google Chat Setup](#google-chat-setup)
+7. [Vertex AI Setup](#vertex-ai-setup)
+8. [Firestore Setup](#firestore-setup)
+9. [Pattern Learning](#pattern-learning)
+10. [Using the Dashboard](#using-the-dashboard)
+11. [API Reference](#api-reference)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -31,8 +33,8 @@ Complete guide for setting up and using On Call Helper to monitor your Nucleus p
 
 ### Required Accounts & Access
 
-- **Anthropic API Key** - For Claude AI (triage and fix generation)
 - **GCP Project Access** - Read access to Cloud Logging (Logging Viewer role)
+- **Claude AI Access** - Via Vertex AI (recommended) or Anthropic API key
 - **GitHub Access** - Push access to the Nucleus repository
 - **Local Nucleus Clone** - The repository being monitored
 
@@ -63,7 +65,7 @@ gcloud auth application-default login
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/tenex-eng/on-call-helper.git
+git clone https://github.com/sri-shara/on-call-helper.git
 cd on-call-helper
 ```
 
@@ -109,10 +111,17 @@ Edit `.env` with your values:
 
 ```bash
 # ═══════════════════════════════════════════════════════════════
-# REQUIRED - AI Features
+# AI Backend - Choose Vertex AI (recommended) or Anthropic API
 # ═══════════════════════════════════════════════════════════════
-# Get from: https://console.anthropic.com/settings/keys
-ANTHROPIC_API_KEY=sk-ant-api03-xxxxx
+# Option A: Vertex AI (uses GCP credentials, no separate API key needed)
+USE_VERTEX=true
+VERTEX_PROJECT_ID=your-vertex-project
+VERTEX_REGION=us-east5
+VERTEX_TRIAGE_MODEL=claude-sonnet-4-5@20250929
+VERTEX_FIXER_MODEL=claude-sonnet-4-5@20250929
+
+# Option B: Anthropic API (set USE_VERTEX=false)
+# ANTHROPIC_API_KEY=sk-ant-api03-xxxxx
 
 # ═══════════════════════════════════════════════════════════════
 # REQUIRED - GCP Cloud Logging
@@ -129,8 +138,20 @@ GCP_AUTO_POLL=true
 # Polling interval in seconds
 GCP_POLL_INTERVAL=30
 
-# Optional: Path to service account key (if not using ADC)
-# GCP_CREDENTIALS_PATH=./credentials.json
+# ═══════════════════════════════════════════════════════════════
+# OPTIONAL - Google Chat Integration
+# ═══════════════════════════════════════════════════════════════
+# Google Chat space ID to monitor for alerts
+GCHAT_SPACE_ID=spaces/YOUR_SPACE_ID
+
+# Auto-start GChat polling on startup
+GCHAT_AUTO_POLL=false
+
+# Polling interval in seconds
+GCHAT_POLL_INTERVAL=30
+
+# Path to service account JSON for Chat API (empty = ADC)
+# GCHAT_CREDENTIALS_PATH=./gchat-credentials.json
 
 # ═══════════════════════════════════════════════════════════════
 # REQUIRED - Local Repository Paths
@@ -225,20 +246,17 @@ python -c "from backend.config import settings; print(f'Project: {settings.gcp_p
 ```bash
 source venv/bin/activate
 
-# Run with default settings (port 8000)
-python -m backend.main
-
-# Or with uvicorn for auto-reload during development
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+# Run with uvicorn for auto-reload during development (port 8080)
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8080
 
 # Or specify a different port
-PORT=8001 python -m backend.main
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 9000
 ```
 
 The backend will be available at:
-- API: http://localhost:8000
-- API Docs: http://localhost:8000/docs
-- Health Check: http://localhost:8000/health
+- API: http://localhost:8080
+- API Docs: http://localhost:8080/docs
+- Health Check: http://localhost:8080/health
 
 ### Start Frontend Dashboard
 
@@ -252,14 +270,19 @@ npm run dev
 The dashboard will be available at:
 - Dashboard: http://localhost:5173
 
+The Vite dev server proxies `/api` and `/ws` requests to the backend on port 8080.
+
 ### Verify Everything is Running
 
 ```bash
 # Check backend health
-curl http://localhost:8000/health
+curl http://localhost:8080/health
 
-# Check frontend proxy to backend
-curl http://localhost:5173/api/health
+# Check incidents API
+curl http://localhost:8080/incidents
+
+# Check frontend is serving
+curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/
 ```
 
 ---
@@ -278,13 +301,13 @@ gcloud auth application-default login
 
 # 2. Polling starts automatically if GCP_AUTO_POLL=true
 # Or start manually via API:
-curl -X POST "http://localhost:8000/gcp/polling/start?interval_seconds=30"
+curl -X POST "http://localhost:8080/gcp/polling/start?interval_seconds=30"
 
 # 3. Check polling status
-curl http://localhost:8000/gcp/polling/status
+curl http://localhost:8080/gcp/polling/status
 
 # 4. Stop polling when done
-curl -X POST http://localhost:8000/gcp/polling/stop
+curl -X POST http://localhost:8080/gcp/polling/stop
 ```
 
 ### Option 2: Pub/Sub Push (Requires Admin Access)
@@ -314,6 +337,127 @@ gcloud pubsub subscriptions create oncall-helper-push \
   --project=YOUR_PROJECT \
   --topic=oncall-helper-errors \
   --push-endpoint=https://YOUR_PUBLIC_URL/webhook/gcp-logs
+```
+
+---
+
+## Google Chat Setup
+
+On Call Helper can monitor a Google Chat space for alert messages (e.g., from GCP alerting policies that post to Chat).
+
+### Architecture
+
+```
+Google Chat Space → Apps Script Relay → Cloudflare Tunnel → On Call Helper Backend
+```
+
+The GChat integration uses a Google Apps Script relay (`scripts/gchat-relay.gs`) that:
+1. Polls the Google Chat API for new messages in the configured space
+2. Forwards alert messages to the On Call Helper backend webhook
+
+### Setup Steps
+
+#### 1. Configure Google Apps Script
+
+1. Go to [script.google.com](https://script.google.com) and create a new project
+2. Copy the contents of `scripts/gchat-relay.gs` into the script editor
+3. Update the `WEBHOOK_URL` constant to point to your backend (or Cloudflare tunnel URL)
+4. Enable the Google Chat API in your Apps Script project:
+   - Go to Services > Add a service > Google Chat API
+5. Deploy the script and set up a time-driven trigger to run periodically
+
+#### 2. Expose Backend via Cloudflare Tunnel (for remote access)
+
+For the Apps Script to reach your local backend, you need a public URL:
+
+```bash
+# Quick tunnel (ephemeral URL, changes on restart)
+cloudflared tunnel --url http://localhost:8080
+
+# Or create a named tunnel (permanent URL, requires Cloudflare account)
+cloudflared tunnel create oncall-helper
+cloudflared tunnel route dns oncall-helper oncall.yourdomain.com
+cloudflared tunnel run --url http://localhost:8080 oncall-helper
+```
+
+Update the `WEBHOOK_URL` in your Apps Script with the tunnel URL.
+
+#### 3. Configure Environment
+
+```bash
+# Google Chat space to monitor
+GCHAT_SPACE_ID=spaces/YOUR_SPACE_ID
+
+# Auto-start polling (alternative to Apps Script relay)
+GCHAT_AUTO_POLL=false
+
+# Polling interval
+GCHAT_POLL_INTERVAL=30
+```
+
+#### 4. Start GChat Polling (if not using Apps Script relay)
+
+```bash
+# Start polling via API
+curl -X POST "http://localhost:8080/gchat/polling/start"
+
+# Check status
+curl http://localhost:8080/gchat/polling/status
+
+# Stop polling
+curl -X POST http://localhost:8080/gchat/polling/stop
+```
+
+### GChat Incidents
+
+GChat incidents are parsed from alert message text and include:
+- Service name extraction from alert patterns (e.g., `configuration_name`, alert titles)
+- Cloud Logging URL extraction (if present in the message)
+- Severity mapping based on alert content
+- Full alert metadata stored in `gchat_metadata`
+
+---
+
+## Vertex AI Setup
+
+Vertex AI allows you to use Claude AI models through Google Cloud Platform, avoiding the need for a separate Anthropic API key.
+
+### Prerequisites
+
+- A GCP project with Vertex AI API enabled
+- Access to Claude models on Vertex AI (Model Garden)
+- `gcloud auth application-default login` for authentication
+
+### Configuration
+
+```bash
+# Enable Vertex AI
+USE_VERTEX=true
+
+# GCP project with Vertex AI access
+VERTEX_PROJECT_ID=your-vertex-project
+
+# Region (must match where Claude is available)
+VERTEX_REGION=us-east5
+
+# Model names (Vertex uses different naming format)
+VERTEX_TRIAGE_MODEL=claude-sonnet-4-5@20250929
+VERTEX_FIXER_MODEL=claude-sonnet-4-5@20250929
+```
+
+### Switching Between Backends
+
+The `backend/ai_client.py` module automatically creates the correct client:
+- `USE_VERTEX=true` → `AnthropicVertex` client (uses GCP credentials)
+- `USE_VERTEX=false` → `Anthropic` client (uses `ANTHROPIC_API_KEY`)
+
+Both clients have identical interfaces (`messages.create()`), so the rest of the codebase doesn't need to change.
+
+### Verify Vertex AI Access
+
+```bash
+# Check that Vertex AI is reachable
+gcloud ai models list --region=us-east5 --project=your-vertex-project
 ```
 
 ---
@@ -403,7 +547,7 @@ PATTERN_OVERRIDE_CONFIDENCE=0.80
 
 ```bash
 # Get pattern learning statistics
-curl http://localhost:8000/patterns/stats
+curl http://localhost:8080/patterns/stats
 
 # Response:
 {
@@ -418,10 +562,10 @@ curl http://localhost:8000/patterns/stats
 }
 
 # Find similar patterns for an error
-curl "http://localhost:8000/patterns/similar?error=nil%20pointer&service=alertservice"
+curl "http://localhost:8080/patterns/similar?error=nil%20pointer&service=alertservice"
 
 # Get current configuration
-curl http://localhost:8000/patterns/config
+curl http://localhost:8080/patterns/config
 ```
 
 ### Override Behavior
@@ -463,6 +607,7 @@ Open http://localhost:5173 in your browser.
 | Status | Description |
 |--------|-------------|
 | `processing` | Pipeline is running |
+| `triaging` | Claude AI analyzing (shows "Analyzing..." in UI) |
 | `triaged` | Claude analyzed the error |
 | `fixing` | Generating code fix |
 | `reviewing` | CodeRabbit reviewing |
@@ -479,6 +624,17 @@ Open http://localhost:5173 in your browser.
 | Self-Healing | Transient error with automatic retry |
 | Infra Issue | Infrastructure problem (AlloyDB, Pub/Sub, etc.) |
 | Needs Review | Too complex for automated fix |
+
+### Cloud Logging Links
+
+Each incident displays a blue link icon next to its ID that opens GCP Cloud Logging:
+- **GCP incidents** - Links directly to the log entry
+- **GChat incidents** - Links to a service-name-based search in Cloud Logging
+- Visible in both the incident list sidebar and the detail panel
+
+### Feedback Actions
+
+For escalated incidents, a "Does not need human review" button allows operators to provide feedback. This feedback is persisted and survives page refreshes.
 
 ---
 
@@ -508,6 +664,7 @@ GET /metrics
 ```bash
 # List all incidents (with optional filters)
 GET /incidents?status=processing&limit=50
+GET /incidents?source=gchat           # Filter by source
 
 # Get specific incident with all results
 GET /incidents/{incident_id}
@@ -517,6 +674,11 @@ GET /incidents/all/details
 
 # Manually resolve an incident
 POST /incidents/{incident_id}/resolve
+
+# Submit feedback on an incident
+POST /incidents/{incident_id}/feedback
+Content-Type: application/json
+{"feedback": "not_needs_human"}
 ```
 
 ### History & Analytics
@@ -554,6 +716,9 @@ GET /patterns/config
 # GCP Pub/Sub push endpoint
 POST /webhook/gcp-logs
 
+# Google Chat alert webhook
+POST /webhook/gchat
+
 # Send test incident
 POST /webhook/test
 Content-Type: application/json
@@ -580,12 +745,25 @@ POST /gcp/polling/stop
 GET /gcp/polling/status
 ```
 
+### Google Chat Polling Control
+
+```bash
+# Start polling
+POST /gchat/polling/start
+
+# Stop polling
+POST /gchat/polling/stop
+
+# Check status
+GET /gchat/polling/status
+```
+
 ### WebSocket
 
-Connect to `ws://localhost:8000/ws` for real-time events:
+Connect to `ws://localhost:8080/ws` for real-time events:
 
 ```javascript
-const ws = new WebSocket('ws://localhost:8000/ws')
+const ws = new WebSocket('ws://localhost:8080/ws')
 
 ws.onmessage = (event) => {
   const data = JSON.parse(event.data)
@@ -594,10 +772,11 @@ ws.onmessage = (event) => {
 ```
 
 Event types:
-- `incident_created` - New incident detected
+- `incident_created` - New incident detected (includes `gcp_log_name`, `gchat_metadata`)
 - `incident_updated` - Incident status changed
 - `incident_resolved` - Incident fixed
 - `incident_escalated` - Requires human attention
+- `triage_complete` - Triage finished (includes `service_name`)
 - `pipeline_stage` - Pipeline progress update
 - `agent_thinking` - Claude AI processing
 - `code_diff` - Generated fix preview
@@ -620,10 +799,12 @@ pip list | grep fastapi
 cat .env | head -5
 
 # Check for port conflicts
-lsof -i :8000
+lsof -i :8080
 ```
 
 ### GCP Authentication Errors
+
+GCP credentials expire periodically and need to be refreshed:
 
 ```bash
 # Re-authenticate
@@ -632,30 +813,39 @@ gcloud auth application-default login
 # Verify project access
 gcloud logging read "severity>=ERROR" --project=YOUR_PROJECT --limit=1
 
-# Check credentials path if using service account
-ls -la ./credentials.json
+# Check credentials
+cat ~/.config/gcloud/application_default_credentials.json | head -3
 ```
+
+If you see `RefreshError: Reauthentication is needed`, just re-run `gcloud auth application-default login`.
 
 ### Dashboard Shows "Disconnected"
 
-1. Check backend is running: `curl http://localhost:8000/health`
-2. Check Vite proxy config in `frontend/vite.config.js` points to correct port
+1. Check backend is running: `curl http://localhost:8080/health`
+2. Check Vite proxy config in `frontend/vite.config.js` points to port 8080
 3. Check browser console for WebSocket errors
 4. Restart frontend: `cd frontend && npm run dev`
 
 ### Incidents Not Appearing
 
 1. Check WebSocket connection in browser dev tools (Network tab)
-2. Verify API returns incidents: `curl http://localhost:8000/incidents`
-3. Check GCP polling is running: `curl http://localhost:8000/gcp/polling/status`
+2. Verify API returns incidents: `curl http://localhost:8080/incidents`
+3. Check GCP polling is running: `curl http://localhost:8080/gcp/polling/status`
 4. Check backend logs for errors
+
+### GChat Incidents Show "unknown" Service
+
+This is expected for newly parsed alerts. The service name is enriched:
+1. At parse time from alert patterns (configuration_name, alert titles)
+2. After triage when Claude identifies the service
+3. At API response time using fallback text extraction
 
 ### Fix Generation Fails
 
 Common reasons:
 - File path in error doesn't exist in local Nucleus repo
 - Claude's generated code doesn't match source (whitespace issues)
-- Anthropic API rate limit
+- Anthropic/Vertex AI rate limit
 
 Check backend logs for specific error messages.
 
@@ -677,14 +867,27 @@ git remote -v
 
 ```bash
 # Check if enabled
-curl http://localhost:8000/patterns/config
+curl http://localhost:8080/patterns/config
 
 # Check pattern stats
-curl http://localhost:8000/patterns/stats
+curl http://localhost:8080/patterns/stats
 
 # Verify Firestore is configured
 echo $STORAGE_BACKEND  # Should be 'firestore'
 ```
+
+### Cloudflare Tunnel Issues
+
+Quick tunnels generate ephemeral URLs that change on restart:
+
+```bash
+# Restart tunnel
+cloudflared tunnel --url http://localhost:8080
+
+# Copy the new URL to your Apps Script WEBHOOK_URL
+```
+
+For a permanent URL, set up a named tunnel with a Cloudflare account.
 
 ---
 
@@ -702,7 +905,7 @@ pytest tests/ -v
 Backend logs go to stdout. For more verbose logging:
 
 ```bash
-LOG_LEVEL=DEBUG python -m backend.main
+LOG_LEVEL=DEBUG uvicorn backend.main:app --reload --port 8080
 ```
 
 ### Simulating Incidents
@@ -711,17 +914,17 @@ Use the test webhook to simulate different error types:
 
 ```bash
 # Fixable error
-curl -X POST http://localhost:8000/webhook/test \
+curl -X POST http://localhost:8080/webhook/test \
   -H "Content-Type: application/json" \
   -d '{"error_message": "nil pointer", "service_name": "alertservice", "tenant_name": "Acme"}'
 
 # Transient error (will be auto-resolved)
-curl -X POST http://localhost:8000/webhook/test \
+curl -X POST http://localhost:8080/webhook/test \
   -H "Content-Type: application/json" \
   -d '{"error_message": "connection reset by peer", "service_name": "alertservice", "tenant_name": "Acme"}'
 
 # Infrastructure error
-curl -X POST http://localhost:8000/webhook/test \
+curl -X POST http://localhost:8080/webhook/test \
   -H "Content-Type: application/json" \
   -d '{"error_message": "AlloyDB connection pool exhausted", "service_name": "caseservice", "tenant_name": "Acme"}'
 ```
